@@ -1,5 +1,13 @@
+# Build
 zig-out/
 .zig-cache/
+
+# Runtime data
 .zagent/sessions/
 .zagent/logs/
-.zagent/memory.md
+.zagent/memory/
+
+# IDE
+.vscode/
+.idea/
+*.swp

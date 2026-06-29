@@ -473,21 +473,14 @@ fn writeDefaultConfig(allocator: std.mem.Allocator, project_root: []const u8, io
         \\vision = true
         \\effort = "high"
         \\
-        \\[[providers]]
-        \\name = "openai"
-        \\kind = "openai"
-        \\base_url = "https://api.openai.com"
-        \\models = ["gpt-4o"]
-        \\api_key_env = "OPENAI_API_KEY"
-        \\context_limit = 128000
-        \\
-        \\[[providers]]
-        \\name = "local"
-        \\kind = "openai"
-        \\base_url = "http://localhost:11434/v1"
-        \\models = ["llama3.1", "qwen2.5"]
-        \\default_model = "llama3.1"
-        \\context_limit = 8192
+        \\# 完整 [[providers]] 示例（取消注释即可使用）：
+        \\# [[providers]]
+        \\# name = "openai"
+        \\# kind = "openai"
+        \\# base_url = "https://api.openai.com"
+        \\# models = ["gpt-4o"]
+        \\# api_key_env = "OPENAI_API_KEY"
+        \\# context_limit = 128000
         \\
         \\[permissions]
         \\mode = "confirm"

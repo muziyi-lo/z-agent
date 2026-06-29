@@ -14,7 +14,6 @@ const root_dir = @import("../tool/root_dir.zig");
 
 pub const Vendor = enum {
     deepseek,
-    minimax,
     standard,
 };
 
@@ -40,7 +39,6 @@ fn matchesHost(base_url: []const u8, host: []const u8) bool {
 
 pub fn detectVendor(base_url: []const u8) Vendor {
     if (matchesHost(base_url, "api.deepseek.com")) return .deepseek;
-    if (matchesHost(base_url, "api.minimaxi.com")) return .minimax;
     return .standard;
 }
 
@@ -290,106 +288,34 @@ pub const OpenAICompatClient = struct {
             const finish_reason = choice.get("finish_reason");
             const delta = choice.get("delta") orelse continue;
 
-            // Vendor-specific reasoning handling
-            switch (self.vendor) {
-                .deepseek => {
-                    // DeepSeek: reasoning_content field in delta
-                    if (delta.object.get("reasoning_content")) |r_val| {
-                        if (r_val != .null) {
-                            const r = r_val.string;
-                            if (phase == .idle or phase == .thinking) {
-                                try out_writer.print("{s}[思考过程]{s}\n", .{ ansi.C.dim, ansi.C.reset });
-                                try out_writer.flush();
-                                phase = .reasoning;
-                            }
-                            try reasoning_buf.appendSlice(r);
-                            try out_writer.print("{s}", .{r});
-                            try out_writer.flush();
-                        }
+            // Reasoning_content (vendor-independent: DeepSeek + OpenAI o-series)
+            if (delta.object.get("reasoning_content")) |r_val| {
+                if (r_val != .null) {
+                    const r = r_val.string;
+                    if (phase == .idle or phase == .thinking) {
+                        try out_writer.print("{s}[思考过程]{s}\n", .{ ansi.C.dim, ansi.C.reset });
+                        try out_writer.flush();
+                        phase = .reasoning;
                     }
-                    if (delta.object.get("content")) |c_val| {
-                        if (c_val != .null) {
-                            const c = c_val.string;
-                            if (phase == .reasoning) {
-                                try out_writer.print("\n\n", .{});
-                                try out_writer.flush();
-                            }
-                            phase = .content;
-                            try content_buf.appendSlice(c);
-                            try out_writer.print("{s}", .{c});
-                            try out_writer.flush();
-                        }
+                    try reasoning_buf.appendSlice(r);
+                    try out_writer.print("{s}", .{r});
+                    try out_writer.flush();
+                }
+            }
+
+            // Content (shared by all vendors)
+            if (delta.object.get("content")) |c_val| {
+                if (c_val != .null) {
+                    const c = c_val.string;
+                    if (phase == .reasoning) {
+                        try out_writer.print("\n\n", .{});
+                        try out_writer.flush();
                     }
-                },
-                .minimax => {
-                    // MiniMax: thinking in content via <think> blocks
-                    if (delta.object.get("content")) |c_val| {
-                        if (c_val != .null) {
-                            const c = c_val.string;
-                            var remaining = c;
-                            while (remaining.len > 0) {
-                                if (phase == .idle or phase == .thinking) {
-                                    if (std.mem.indexOf(u8, remaining, "<think>")) |think_start| {
-                                        // Output any text before <think> as content
-                                        if (think_start > 0) {
-                                            const before = remaining[0..think_start];
-                                            try content_buf.appendSlice(before);
-                                            try out_writer.print("{s}", .{before});
-                                            try out_writer.flush();
-                                        }
-                                        remaining = remaining[think_start + "<think>".len..];
-                                        if (phase == .idle) {
-                                            try out_writer.print("{s}[思考过程]{s}\n", .{ ansi.C.dim, ansi.C.reset });
-                                            try out_writer.flush();
-                                        }
-                                        phase = .thinking;
-                                    } else {
-                                        // No <think> tag, all content
-                                        try content_buf.appendSlice(remaining);
-                                        try out_writer.print("{s}", .{remaining});
-                                        try out_writer.flush();
-                                        phase = .content;
-                                        break;
-                                    }
-                                } else if (phase == .thinking) {
-                                    if (std.mem.indexOf(u8, remaining, "</think>")) |think_end| {
-                                        const think_text = remaining[0..think_end];
-                                        try reasoning_buf.appendSlice(think_text);
-                                        try out_writer.print("{s}", .{think_text});
-                                        try out_writer.flush();
-                                        remaining = remaining[think_end + "</think>".len..];
-                                        try out_writer.print("\n\n", .{});
-                                        try out_writer.flush();
-                                        phase = .content;
-                                    } else {
-                                        try reasoning_buf.appendSlice(remaining);
-                                        try out_writer.print("{s}", .{remaining});
-                                        try out_writer.flush();
-                                        break;
-                                    }
-                                } else {
-                                    // content phase - just append
-                                    try content_buf.appendSlice(remaining);
-                                    try out_writer.print("{s}", .{remaining});
-                                    try out_writer.flush();
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                },
-                .standard => {
-                    // Standard OpenAI: simple content, no reasoning
-                    if (delta.object.get("content")) |c_val| {
-                        if (c_val != .null) {
-                            const c = c_val.string;
-                            phase = .content;
-                            try content_buf.appendSlice(c);
-                            try out_writer.print("{s}", .{c});
-                            try out_writer.flush();
-                        }
-                    }
-                },
+                    phase = .content;
+                    try content_buf.appendSlice(c);
+                    try out_writer.print("{s}", .{c});
+                    try out_writer.flush();
+                }
             }
 
             // Tool calls (same for all vendors)
@@ -463,9 +389,7 @@ pub const OpenAICompatClient = struct {
 
         return types.ChatResponse{
             .content = try content_buf.toOwnedSlice(),
-            .reasoning = if (self.vendor == .minimax and reasoning_buf.items.len > 0)
-                try reasoning_buf.toOwnedSlice()
-            else if (self.vendor == .deepseek and reasoning_buf.items.len > 0)
+            .reasoning = if (self.vendor == .deepseek and reasoning_buf.items.len > 0)
                 try reasoning_buf.toOwnedSlice()
             else
                 null,
@@ -562,9 +486,6 @@ pub const OpenAICompatClient = struct {
             .deepseek => {
                 try buf.appendSlice(",\"thinking\":{\"type\":\"enabled\"}");
                 try buf.appendSlice(",\"reasoning_effort\":\"high\"");
-            },
-            .minimax => {
-                try buf.appendSlice(",\"thinking\":{\"type\":\"adaptive\"}");
             },
             .standard => {
                 try buf.appendSlice(",\"reasoning_effort\":\"high\"");
@@ -701,7 +622,6 @@ test "detectVendor: standard for others" {
     const testing = std.testing;
     try testing.expect(detectVendor("https://api.openai.com") == .standard);
     try testing.expect(detectVendor("http://localhost:11434/v1") == .standard);
-    try testing.expect(detectVendor("https://api.minimaxi.com") == .minimax);
 }
 
 test "modelSpec: known models" {
@@ -743,31 +663,6 @@ test "buildJsonBody: includes vendor thinking fields for deepseek" {
     try testing.expect(std.mem.indexOf(u8, body, "thinking") != null);
     try testing.expect(std.mem.indexOf(u8, body, "reasoning_effort") != null);
     try testing.expect(std.mem.indexOf(u8, body, "enabled") != null);
-}
-
-test "buildJsonBody: includes thinking for minimax" {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    const config = types.ModelConfig{
-        .api = "minimax",
-        .model = "minimax-model",
-        .base_url = "https://api.minimaxi.com",
-        .api_key = "test-key",
-    };
-    var client = OpenAICompatClient{
-        .config = config,
-        .allocator = testing.allocator,
-        .vendor = .minimax,
-    };
-    const messages = [_]types.Message{
-        .{ .role = .user, .content = try allocContent(allocator, "hello") },
-    };
-    const body = try client.buildJsonBody(allocator, &messages, false);
-    defer allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "thinking") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "adaptive") != null);
-    // Minimax should NOT have reasoning_effort
-    try testing.expect(std.mem.indexOf(u8, body, "reasoning_effort") == null);
 }
 
 test "buildJsonBody: standard has reasoning_effort but no thinking" {

@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `src/ansi.zig` — 重构色彩模块：新增 `shouldColorize()` 函数（四级检测链：NO_COLOR/TERM=dumb/非TTY/Windows VT），`Color` 改用默认值替代运行时初始化，`C` 全局变量保留向后兼容（`src/ansi.zig`）
+
+### Changed
+- `src/provider/openai_compat.zig` — `reasoning_content` 处理从 vendor switch 内提升为共享逻辑，Standard 供应商（OpenAI o-series）也可正确显示推理过程（`src/provider/openai_compat.zig`）
+- `src/config.zig` — 默认模板精简：仅保留 deepseek（已测试），openai/local 供应商示例改为单条注释模板（`src/config.zig`）
+
+### Removed
+- `src/provider/openai_compat.zig` — 移除 `minimax` 供应商特化代码（无 API 无测试），`Vendor` 缩减为 `deepseek`/`standard` 二值；删除 `<think>` 标签解析、`thinking: adaptive` 请求字段、相关测试共 ~90 行
+
+### Tests
+- `src/ansi.zig` — 新增 4 个测试：Color 默认值验证、init/supportsColor 兼容性、NO_COLOR/TTY 检测（libc 条件跳过）
+
 ## [0.2.0] - 2026-06-28
 
 ### Added
