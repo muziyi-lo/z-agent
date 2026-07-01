@@ -61,7 +61,6 @@ Auto-creates `.zagent/config.toml` on first run with sensible defaults. Fields:
 | Provider | Kind | Env Variable | Notes |
 |----------|------|-------------|-------|
 | DeepSeek | openai | `DEEPSEEK_API_KEY` | Default, 1M context |
-
 | Ollama | openai | — | Local, no API key needed |
 
 ## Features
