@@ -10,7 +10,7 @@ Developed on **Windows only**. Not tested on Linux or macOS. Patches welcome.
 
 This is a humble CLI agent, born from a simple thought: *could someone who doesn't know how to code build a project using just AI?* So I set out to use an AI agent to build an AI agent — using OpenCode + DeepSeek v4, written in a language I had zero prior experience with: **Zig**. It took about a week. It's rough, the UX is far from polished, but it runs. And the compiled binary is only 3 MB.
 
-To be honest, I thought it was already usable — but after actually using it, I found way more bugs than I expected. The truth is, vibe coding gets you to "it compiles" fast, but the gap between "compiles" and "works reliably" is bigger than I imagined. There's still a lot to fix.
+~~To be honest, I thought it was already usable — but after actually using it, I found way more bugs than I expected. The truth is, vibe coding gets you to "it compiles" fast, but the gap between "compiles" and "works reliably" is bigger than I imagined. There's still a lot to fix.~~
 
 — *A user who can't code, but wants to.*
 
