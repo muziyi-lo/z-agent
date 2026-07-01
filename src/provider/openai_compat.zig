@@ -2,11 +2,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../types.zig");
 const ansi = @import("../ansi.zig");
+const streamfmt = @import("../stream.zig");
 const sse = @import("../sse.zig");
 const common = @import("common.zig");
 const registry = @import("registry.zig");
 const signal = @import("../signal.zig");
+const retry = @import("retry.zig");
 const root_dir = @import("../tool/root_dir.zig");
+const md2ansi = @import("md2ansi");
 
 // ---------------------------------------------------------------------------
 // Vendor detection
@@ -165,7 +168,13 @@ pub const OpenAICompatClient = struct {
         var argv_builder = std.array_list.Managed([]const u8).init(allocator);
         defer argv_builder.deinit();
 
-        try argv_builder.appendSlice(&.{ "curl.exe", "-sN", "--fail-with-body", "--max-time", "30" });
+        const connect_timeout = self.config.connect_timeout_secs orelse 15;
+        const max_timeout = self.config.max_timeout_secs orelse 60;
+        var connect_buf: [16]u8 = undefined;
+        var max_buf: [16]u8 = undefined;
+        const connect_str = try std.fmt.bufPrint(&connect_buf, "{d}", .{connect_timeout});
+        const max_str = try std.fmt.bufPrint(&max_buf, "{d}", .{max_timeout});
+        try argv_builder.appendSlice(&.{ "curl.exe", "-sN", "--fail-with-body", "--connect-timeout", connect_str, "--max-time", max_str });
         try argv_builder.appendSlice(&.{ "-X", "POST", url });
         try argv_builder.appendSlice(&.{ "-H", "Content-Type: application/json" });
         try argv_builder.appendSlice(&.{ "-H", "Accept: application/json" });
@@ -223,6 +232,11 @@ pub const OpenAICompatClient = struct {
         var tool_calls_buf = std.array_list.Managed(types.ToolCall).init(allocator);
         defer tool_calls_buf.deinit();
 
+        // 段落级覆盖渲染状态
+        var paragraph_start: usize = 0;
+        var last_was_newline = false;
+        var scratch_buf: [16384]u8 = undefined;
+
         var usage: ?types.Usage = null;
 
         // Debug output log
@@ -236,9 +250,15 @@ pub const OpenAICompatClient = struct {
         } else null;
         defer if (dbg) |f| f.close(io);
 
-        // SSE streaming via SseStream
-        var stream = sse.SseStream.init(stdout_file, io, allocator);
-        defer stream.deinit();
+        // Inline SSE reading with error body capture.
+        // We read the pipe directly to capture non-SSE error response bodies
+        // (e.g., JSON error responses from --fail-with-body) for error classification.
+        const sse_read_buf = try allocator.alloc(u8, 4096);
+        defer allocator.free(sse_read_buf);
+        var sse_file_reader = stdout_file.readerStreaming(io, sse_read_buf);
+        const sse_reader = &sse_file_reader.interface;
+        var error_body_buf = std.array_list.Managed(u8).init(allocator);
+        defer error_body_buf.deinit();
 
         var seen_first_data = false;
 
@@ -251,13 +271,29 @@ pub const OpenAICompatClient = struct {
                 return error.Interrupted;
             }
 
-            const payload = stream.next() catch {
-                return error.ReadFailed;
-            } orelse break;
+            const line_opt = sse_reader.takeDelimiter('\n') catch |err| switch (err) {
+                error.ReadFailed => return error.ReadFailed,
+                error.StreamTooLong => return error.StreamTooLong,
+            };
+            const raw_line = line_opt orelse break;
+            const line = std.mem.trimEnd(u8, raw_line, "\r");
+
+            if (!std.mem.startsWith(u8, line, "data: ")) {
+                // Capture non-SSE lines as potential error body.
+                // Only accumulate before first SSE data is seen.
+                if (!seen_first_data) {
+                    error_body_buf.appendSlice(raw_line) catch {};
+                }
+                continue;
+            }
 
             if (!seen_first_data) {
                 seen_first_data = true;
             }
+
+            const payload = line[6..];
+
+            if (std.mem.eql(u8, payload, "[DONE]")) break;
 
             // Debug log raw payload
             if (dbg) |f| {
@@ -266,18 +302,21 @@ pub const OpenAICompatClient = struct {
                 _ = f.writeStreamingAll(io, "\n") catch {};
             }
 
-            const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, payload, .{}) catch continue;
+            var parsed = std.json.parseFromSlice(std.json.Value, allocator, payload, .{}) catch continue;
+            defer parsed.deinit();
 
-            if (parsed.object.get("error")) |err_val| {
+            if (parsed.value.object.get("error")) |err_val| {
                 const msg = if (err_val.object.get("message")) |m| m.string else "unknown error";
                 try out_writer.print("\n{s}[API 错误]{s} {s}\n", .{ ansi.C.red, ansi.C.reset, msg });
                 try out_writer.flush();
+                // Store error body for retry classification
+                retry.last_error_body = msg;
                 return error.ApiError;
             }
 
-            const choices = parsed.object.get("choices") orelse continue;
+            const choices = parsed.value.object.get("choices") orelse continue;
             if (choices.array.items.len == 0) {
-                if (parsed.object.get("usage")) |usage_val| {
+                if (parsed.value.object.get("usage")) |usage_val| {
                     if (usage_val != .null) {
                         usage = common.parseUsage(usage_val) catch null;
                     }
@@ -292,13 +331,14 @@ pub const OpenAICompatClient = struct {
             if (delta.object.get("reasoning_content")) |r_val| {
                 if (r_val != .null) {
                     const r = r_val.string;
+                    // 同一推理阶段合并 header：仅在首次进入时输出 header
                     if (phase == .idle or phase == .thinking) {
-                        try out_writer.print("{s}[思考过程]{s}\n", .{ ansi.C.dim, ansi.C.reset });
+                        try streamfmt.formatReasoningHeader(out_writer);
                         try out_writer.flush();
                         phase = .reasoning;
                     }
                     try reasoning_buf.appendSlice(r);
-                    try out_writer.print("{s}", .{r});
+                    try streamfmt.formatReasoningText(out_writer, r);
                     try out_writer.flush();
                 }
             }
@@ -308,13 +348,17 @@ pub const OpenAICompatClient = struct {
                 if (c_val != .null) {
                     const c = c_val.string;
                     if (phase == .reasoning) {
-                        try out_writer.print("\n\n", .{});
+                        try streamfmt.formatContentTransition(out_writer);
                         try out_writer.flush();
                     }
                     phase = .content;
                     try content_buf.appendSlice(c);
-                    try out_writer.print("{s}", .{c});
-                    try out_writer.flush();
+                    if (ansi.shouldColorize()) {
+                        try processContentChunk(out_writer, &content_buf, c, &paragraph_start, &last_was_newline, &scratch_buf);
+                    } else {
+                        try out_writer.print("{s}", .{c});
+                        try out_writer.flush();
+                    }
                 }
             }
 
@@ -373,9 +417,22 @@ pub const OpenAICompatClient = struct {
         const term = try child.wait(io);
         child_finished = true;
 
+        // Store error body for retry classification before checkSseExit may error
+        if (error_body_buf.items.len > 0) {
+            retry.last_error_body = error_body_buf.items;
+        }
+
         // If no SSE data was received, the response was not valid SSE.
         // Return ApiError so callWithRetry won't retry auth/permission errors.
-        try checkSseExit(seen_first_data, term);
+        try checkSseExit(term);
+
+        // Force overlay remaining content on stream end (仅 TTY 时)
+        if (phase == .content and paragraph_start < content_buf.items.len and ansi.shouldColorize()) {
+            const pending = content_buf.items[paragraph_start..];
+            if (pending.len > 0) {
+                overlayParagraph(out_writer, pending, &scratch_buf) catch {};
+            }
+        }
 
         // Build response
         if (tool_calls_buf.items.len > 0) {
@@ -576,17 +633,93 @@ fn serializeMultiPart(buf: *std.array_list.Managed(u8), parts: []const types.Con
 /// Check child process exit after SSE streaming.
 /// If no SSE data was received (seen_first_data=false) and exit code is non-zero,
 /// return ApiError (non-retryable) instead of CurlFailed (which gets retried).
-fn checkSseExit(seen_first_data: bool, term: std.process.Child.Term) !void {
-    if (!seen_first_data) {
-        switch (term) {
-            .exited => |code| if (code != 0) return error.ApiError,
-            else => return error.ApiError,
+fn checkSseExit(term: std.process.Child.Term) !void {
+    switch (term) {
+        .exited => |code| if (code != 0) return error.ApiError,
+        else => return error.ApiError,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 段落级覆盖渲染
+// ---------------------------------------------------------------------------
+
+/// Scan chunk for paragraph boundaries (blank line = \n\n). When a complete
+/// paragraph is detected, overlay it with ANSI-colored rendering via md2ansi.
+fn processContentChunk(
+    writer: anytype,
+    content_buf: *std.array_list.Managed(u8),
+    chunk: []const u8,
+    paragraph_start: *usize,
+    last_was_newline: *bool,
+    scratch_buf_ptr: *[16384]u8,
+) !void {
+    const old_len = content_buf.items.len - chunk.len;
+
+    // Print chunk raw for real-time feedback
+    try writer.print("{s}", .{chunk});
+    try writer.flush();
+
+    // Check for \n\n boundary (scans cross-chunk boundary too)
+    var boundary_found = false;
+    var prev = last_was_newline.*;
+    for (chunk) |byte| {
+        if (byte == '\n') {
+            if (prev) {
+                boundary_found = true;
+                break;
+            }
+            prev = true;
+        } else {
+            prev = false;
         }
     }
-    switch (term) {
-        .exited => |code| if (code != 0) return error.CurlFailed,
-        else => return error.CurlFailed,
+    last_was_newline.* = chunk.len > 0 and chunk[chunk.len - 1] == '\n';
+
+    if (boundary_found) {
+        const cursor_pos = old_len + chunk.len;
+        const raw_text = content_buf.items[paragraph_start.* .. cursor_pos];
+        if (raw_text.len > 0) {
+            // Overlay failure (buffer overflow, etc.) is non-fatal:
+            // fall back to raw text that was already printed.
+            overlayParagraph(writer, raw_text, scratch_buf_ptr) catch {};
+        }
+        paragraph_start.* = cursor_pos;
     }
+}
+
+/// Move cursor up by number of newlines in text, clear below, render markdown
+/// to ANSI, and output colored version. Removes trailing \n from rendered
+/// output so line count matches the raw text.
+fn overlayParagraph(
+    writer: anytype,
+    text: []const u8,
+    scratch_buf_ptr: *[16384]u8,
+) !void {
+    if (text.len == 0) return;
+
+    var line_count: usize = 0;
+    for (text) |byte| {
+        if (byte == '\n') line_count += 1;
+    }
+
+    // Column 0, cursor up to paragraph start, clear from there.
+    // line_count covers ALL content since paragraph_start, so \x1b[0J
+    // clears exactly the content area — preserving the separator above.
+    try writer.print("\x1b[0G\x1b[{d}A\x1b[0J", .{line_count});
+    try writer.flush();
+
+    var w: std.Io.Writer = .fixed(scratch_buf_ptr);
+    try md2ansi.render(&w, text);
+    var rendered = w.buffered();
+    // Remove trailing \n: md2ansi.render always adds one extra \n at the end
+    // (from the last line's renderParagraph). Without removal, the rendered
+    // output would be 1 line taller than the raw text it replaces.
+    if (rendered.len > 0 and rendered[rendered.len - 1] == '\n') {
+        rendered = rendered[0 .. rendered.len - 1];
+    }
+    try writer.writeAll(rendered);
+    try writer.flush();
 }
 
 // ---------------------------------------------------------------------------
@@ -655,8 +788,10 @@ test "buildJsonBody: includes vendor thinking fields for deepseek" {
         .allocator = testing.allocator,
         .vendor = .deepseek,
     };
+    const content_parts = try allocContent(allocator, "hello");
+    defer allocator.free(content_parts);
     const messages = [_]types.Message{
-        .{ .role = .user, .content = try allocContent(allocator, "hello") },
+        .{ .role = .user, .content = content_parts },
     };
     const body = try client.buildJsonBody(allocator, &messages, false);
     defer allocator.free(body);
@@ -679,8 +814,10 @@ test "buildJsonBody: standard has reasoning_effort but no thinking" {
         .allocator = testing.allocator,
         .vendor = .standard,
     };
+    const content_parts = try allocContent(allocator, "hello");
+    defer allocator.free(content_parts);
     const messages = [_]types.Message{
-        .{ .role = .user, .content = try allocContent(allocator, "hello") },
+        .{ .role = .user, .content = content_parts },
     };
     const body = try client.buildJsonBody(allocator, &messages, false);
     defer allocator.free(body);
@@ -702,8 +839,10 @@ test "buildJsonBody: includes stream_options" {
         .allocator = testing.allocator,
         .vendor = .standard,
     };
+    const content_parts = try allocContent(allocator, "hello");
+    defer allocator.free(content_parts);
     const messages = [_]types.Message{
-        .{ .role = .user, .content = try allocContent(allocator, "hello") },
+        .{ .role = .user, .content = content_parts },
     };
     const body = try client.buildJsonBody(allocator, &messages, true);
     defer allocator.free(body);
@@ -714,26 +853,21 @@ test "buildJsonBody: includes stream_options" {
 test "checkSseExit: non-SSE with non-zero exit returns ApiError" {
     const testing = std.testing;
     // Simulate HTTP 401/403/500: no SSE data, curl exit code 22
-    try testing.expectError(error.ApiError, checkSseExit(false, .{ .exited = 22 }));
-    try testing.expectError(error.ApiError, checkSseExit(false, .{ .exited = 1 }));
+    try testing.expectError(error.ApiError, checkSseExit(.{ .exited = 22 }));
+    try testing.expectError(error.ApiError, checkSseExit(.{ .exited = 1 }));
 }
 
-test "checkSseExit: non-SSE with zero exit passes" {
-    // No SSE data but exit code 0 (unusual but not an error)
-    try checkSseExit(false, .{ .exited = 0 });
+test "checkSseExit: zero exit passes" {
+    try checkSseExit(.{ .exited = 0 });
 }
 
-test "checkSseExit: SSE with non-zero exit returns CurlFailed" {
+test "checkSseExit: non-zero exit returns ApiError regardless of SSE data" {
     const testing = std.testing;
-    // Had SSE data but process failed (e.g. curl network error mid-stream)
-    try testing.expectError(error.CurlFailed, checkSseExit(true, .{ .exited = 22 }));
-    try testing.expectError(error.CurlFailed, checkSseExit(true, .{ .exited = 1 }));
+    try testing.expectError(error.ApiError, checkSseExit(.{ .exited = 22 }));
+    try testing.expectError(error.ApiError, checkSseExit(.{ .exited = 1 }));
 }
 
-test "checkSseExit: SSE with zero exit passes" {
-    // Normal case: SSE data received, process exited OK
-    try checkSseExit(true, .{ .exited = 0 });
-}
+
 
 test "setModel preserves client state" {
     const testing = std.testing;
@@ -769,8 +903,10 @@ test "setModel preserves client state" {
     try testing.expect(client.vendor == .deepseek);
 
     // Build JSON body before and after - should be identical when model name is same
+    const cp1 = try allocContent(allocator, "hello");
+    defer allocator.free(cp1);
     const messages = [_]types.Message{
-        .{ .role = .user, .content = try allocContent(allocator, "hello") },
+        .{ .role = .user, .content = cp1 },
     };
 
     const json1 = try client.buildJsonBody(allocator, &messages, true);
@@ -781,6 +917,8 @@ test "setModel preserves client state" {
 
     try testing.expectEqualStrings(json1, json2);
 
+    // Free the first dupe'd model before second setModel
+    allocator.free(client.config.model);
     // Set a different model and verify JSON body changes accordingly
     prov.setModel("gpt-4o");
     try testing.expectEqualStrings("gpt-4o", client.config.model);
@@ -796,6 +934,73 @@ test "setModel preserves client state" {
     try testing.expect(std.mem.indexOf(u8, json3, "gpt-4o") != null);
     // JSON should differ from json1 (different model name)
     try testing.expect(!std.mem.eql(u8, json1, json3));
+
+    // Free the second dupe'd model from setModel
+    allocator.free(client.config.model);
+}
+
+test "overlayParagraph: renders ANSI codes for simple text" {
+    var scratch: [16384]u8 = undefined;
+    var out_buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    try overlayParagraph(&w, "hello **world**", &scratch);
+    const output = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[1m") != null); // bold for **world**
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[0m") != null); // reset
+    try std.testing.expect(std.mem.indexOf(u8, output, "hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "world") != null);
+    // Literal ** markers should NOT appear
+    try std.testing.expect(std.mem.indexOf(u8, output, "**") == null);
+}
+
+test "overlayParagraph: empty input produces no output" {
+    var scratch: [16384]u8 = undefined;
+    var out_buf: [4]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    try overlayParagraph(&w, "", &scratch);
+    const output = w.buffered();
+    try std.testing.expectEqual(@as(usize, 0), output.len);
+}
+
+test "overlayParagraph: renders heading with ANSI" {
+    var scratch: [16384]u8 = undefined;
+    var out_buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    try overlayParagraph(&w, "# Title", &scratch);
+    const output = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[1m") != null); // bold
+    try std.testing.expect(std.mem.indexOf(u8, output, "\x1b[36m") != null); // cyan
+    try std.testing.expect(std.mem.indexOf(u8, output, "Title") != null);
+}
+
+test "processContentChunk: detects paragraph boundary and overlays" {
+    var scratch: [16384]u8 = undefined;
+    var out_buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out_buf);
+    var content = std.array_list.Managed(u8).init(std.testing.allocator);
+    defer content.deinit();
+    var para_start: usize = 0;
+    var last_nl = false;
+
+    // Append first line without newline
+    try content.appendSlice("Hello world");
+    // Append newline - sets last_was_newline = true
+    try content.appendSlice("\n");
+    try processContentChunk(&w, &content, "\n", &para_start, &last_nl, &scratch);
+    // No boundary detected yet (only one \n)
+    try std.testing.expectEqual(@as(usize, 0), para_start);
+    try std.testing.expect(last_nl);
+
+    // Append second newline - should trigger boundary
+    const output_len_before = w.buffered().len;
+    try content.appendSlice("\n");
+    try processContentChunk(&w, &content, "\n", &para_start, &last_nl, &scratch);
+    const output = w.buffered();
+    // Overlay should have written ANSI codes + cursor movement
+    try std.testing.expect(output.len > output_len_before);
+    try std.testing.expect(std.mem.indexOf(u8, output[output_len_before..], "\x1b[") != null);
+    // paragraph_start should advance past the \n\n
+    try std.testing.expectEqual(@as(usize, 13), para_start);
 }
 
 fn allocContent(allocator: std.mem.Allocator, text: []const u8) ![]const types.ContentPart {

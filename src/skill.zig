@@ -265,7 +265,15 @@ test "getBuiltinSkills: returns z-improve skill" {
     const allocator = testing.allocator;
 
     const skills = try getBuiltinSkills(allocator);
-    defer allocator.free(skills);
+    defer {
+        for (skills) |s| {
+            allocator.free(s.name);
+            allocator.free(s.slug);
+            allocator.free(s.description);
+            allocator.free(s.path);
+        }
+        allocator.free(skills);
+    }
 
     try testing.expectEqual(@as(usize, 1), skills.len);
     try testing.expectEqualStrings("z-improve", skills[0].slug);
@@ -280,7 +288,15 @@ test "getBuiltinSkills: error path - invalid content returns empty" {
 
     // getBuiltinSkills always succeeds with valid embedded_z_improve.
     const skills = try getBuiltinSkills(allocator);
-    defer allocator.free(skills);
+    defer {
+        for (skills) |s| {
+            allocator.free(s.name);
+            allocator.free(s.slug);
+            allocator.free(s.description);
+            allocator.free(s.path);
+        }
+        allocator.free(skills);
+    }
     try testing.expect(skills.len > 0);
     try testing.expectEqualStrings("z-improve", skills[0].name);
 }

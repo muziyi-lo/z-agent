@@ -41,7 +41,9 @@ pub fn printHelp(stdout: *Io.Writer) !void {
         \\  -l, --list                   List available sessions
         \\  -s, --session <index|id>    Resume a specific session
         \\  --agent <path>               Run as sub-agent with given agent definition
+        \\  --model <provider/model>     Override default model (e.g. deepseek/deepseek-v4-flash)
         \\  --trust                      Skip all permission confirmations
+        \\  --readonly                   Deny all write operations (read-only mode)
         \\
         \\If <prompt> is provided, runs in single-turn mode.
         \\Otherwise, starts an interactive REPL.

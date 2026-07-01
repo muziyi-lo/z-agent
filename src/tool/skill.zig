@@ -45,10 +45,11 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
 
 pub fn renderResult(allocator: std.mem.Allocator, stdout: *std.Io.Writer, json_str: []const u8) !void {
     if (!std.mem.startsWith(u8, json_str, "{")) return stdout.print("  → {s}\n", .{json_str});
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, json_str, .{}) catch {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch {
         return stdout.print("  → {s}\n", .{json_str});
     };
-    const obj = parsed.object;
+    defer parsed.deinit();
+    const obj = parsed.value.object;
     const name = if (obj.get("name")) |v| if (v == .string) v.string else "" else "";
     const content = if (obj.get("content")) |v| if (v == .string) v.string else "" else "";
     if (name.len > 0) try stdout.print("  [{s}]\n", .{name});

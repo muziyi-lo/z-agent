@@ -4,8 +4,8 @@ const root_dir = @import("root_dir.zig");
 const ToolResult = @import("registry.zig").ToolResult;
 
 pub const tool_name = "task";
-pub const tool_description = "Delegate a task to a sub-agent. The sub-agent runs in an isolated process with its own system prompt. Use for code review, analysis, research tasks that need focused attention.";
-pub const tool_params = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\",\"description\":\"Name of the agent (e.g. 'worker', 'critic'). Must match a file in .opencode/agents/\"},\"task\":{\"type\":\"string\",\"description\":\"Detailed description of the task to delegate\"}},\"required\":[\"agent\",\"task\"]}";
+pub const tool_description = "Delegate a task to a sub-agent. The sub-agent runs in an isolated process with its own system prompt. Use `files` to pass file contents as context without reading them yourself first. Sub-agents run in read-only mode by default; set `trust` to true to allow write operations. Use for code review, analysis, research tasks that need focused attention.";
+pub const tool_params = "{\"type\":\"object\",\"properties\":{\"agent\":{\"type\":\"string\",\"description\":\"Name of the agent (e.g. 'worker', 'critic'). Must match a file in .opencode/agents/\"},\"task\":{\"type\":\"string\",\"description\":\"Detailed description of the task to delegate\"},\"files\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"File paths to read and include as context for the sub-agent\"},\"trust\":{\"type\":\"boolean\",\"description\":\"If true, sub-agent runs with full permissions (write allowed). Default: false (read-only)\"}},\"required\":[\"agent\",\"task\"]}";
 
 const embedded_explore =
     \\---
@@ -56,6 +56,10 @@ fn loadAgentContent(allocator: std.mem.Allocator, io: std.Io, file_path: []const
     }
 }
 
+/// Execute the task tool. Required args: `agent` (string), `task` (string).
+/// Optional: `files` (array of strings) — file paths to read and include as
+/// inline context prepended to the task prompt. File reading is best-effort:
+/// missing/binary/OOM errors are annotated inline without blocking the task.
 pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) ToolResult {
     const args_obj = args.object;
     const agent_val = args_obj.get("agent") orelse return ToolResult.fail(std.fmt.allocPrint(allocator, "Error: missing 'agent' argument", .{}) catch "Error: OOM");
@@ -63,12 +67,96 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
     const agent = agent_val.string;
     const task = task_val.string;
 
+    const trust_val = args_obj.get("trust");
+    const is_trust = if (trust_val) |tv| tv == .bool and tv.bool else false;
+    const perm_flag = if (is_trust) "--trust" else "--readonly";
+
+    // Files inclusion: read referenced files and prepend as context.
+    // All `catch {}` below are best-effort annotation: if OOM prevents us
+    // from noting a file error, the file is silently skipped. The next file
+    // still gets a chance. This is acceptable because file content inclusion
+    // is a convenience, not a correctness requirement.
+    var owned_merged: ?[]const u8 = null;
+    defer if (owned_merged) |m| allocator.free(m);
+    const effective_task = if (args_obj.get("files")) |fv| blk: {
+        if (fv != .array or fv.array.items.len == 0) break :blk task;
+        var buf = std.array_list.Managed(u8).init(allocator);
+        defer buf.deinit();
+        buf.appendSlice("Referenced files:\n") catch break :blk task;
+        for (fv.array.items) |file_val| {
+            if (file_val != .string) continue;
+            const raw_path = file_val.string;
+            const resolved = if (std.fs.path.isAbsolute(raw_path))
+                raw_path
+            else if (root_dir.project_root.len > 0)
+                (std.fs.path.join(allocator, &.{ root_dir.project_root, raw_path }) catch blk2: {
+                    buf.appendSlice("--- ") catch {};
+                    buf.appendSlice(raw_path) catch {};
+                    buf.appendSlice(" ---\n(error: path join OOM, using raw path)\n---\n") catch {};
+                    break :blk2 raw_path;
+                })
+            else
+                raw_path;
+            const need_free = resolved.ptr != raw_path.ptr;
+            defer if (need_free) allocator.free(resolved);
+            const file = std.Io.Dir.cwd().openFile(io, resolved, .{ .mode = .read_only }) catch |err| {
+                buf.appendSlice("--- ") catch {};
+                buf.appendSlice(raw_path) catch {};
+                buf.appendSlice(" ---\n(error: can't open: ") catch {};
+                const err_str = std.fmt.allocPrint(allocator, "{}", .{err}) catch continue;
+                defer allocator.free(err_str);
+                buf.appendSlice(err_str) catch {};
+                buf.appendSlice(")\n---\n") catch {};
+                continue;
+            };
+            defer file.close(io);
+            const stat = file.stat(io) catch {
+                buf.appendSlice("--- ") catch {};
+                buf.appendSlice(raw_path) catch {};
+                buf.appendSlice(" ---\n(error: stat failed)\n---\n") catch {};
+                continue;
+            };
+            const size: usize = @intCast(stat.size);
+            const max_bytes: usize = 50 * 1024;
+            const read_size = @min(size, max_bytes);
+            const content = allocator.alloc(u8, read_size) catch {
+                buf.appendSlice("--- ") catch {};
+                buf.appendSlice(raw_path) catch {};
+                buf.appendSlice(" ---\n(error: OOM)\n---\n") catch {};
+                continue;
+            };
+            defer allocator.free(content);
+            const n = file.readPositionalAll(io, content, 0) catch {
+                buf.appendSlice("--- ") catch {};
+                buf.appendSlice(raw_path) catch {};
+                buf.appendSlice(" ---\n(error: read failed)\n---\n") catch {};
+                continue;
+            };
+            if (std.mem.indexOfScalar(u8, content[0..n], 0) != null) {
+                buf.appendSlice("--- ") catch {};
+                buf.appendSlice(raw_path) catch {};
+                buf.appendSlice(" ---\n(skipped: binary)\n---\n") catch {};
+                continue;
+            }
+            buf.appendSlice("--- ") catch {};
+            buf.appendSlice(raw_path) catch {};
+            buf.appendSlice(" ---\n") catch {};
+            buf.appendSlice(content[0..n]) catch {};
+            if (size > max_bytes) buf.appendSlice("\n...(truncated)") catch {};
+            buf.appendSlice("\n---\n") catch {};
+        }
+        buf.appendSlice("\n") catch {};
+        buf.appendSlice(task) catch {};
+        owned_merged = buf.toOwnedSlice() catch break :blk task;
+        break :blk owned_merged.?;
+    } else task;
+
     const using_fallback_root = root_dir.project_root.len == 0;
     const zagent_root = if (!using_fallback_root) root_dir.project_root else
         (config_mod.findZagentRoot(allocator, io) orelse return ToolResult.fail(std.fmt.allocPrint(allocator, "Error: cannot find .zagent directory", .{}) catch "Error: OOM"));
     defer if (using_fallback_root) allocator.free(zagent_root);
 
-    const agent_path = std.fs.path.join(allocator, &.{ zagent_root, ".opencode", "agents", agent }) catch return ToolResult.fail("Error: OOM");
+    const agent_path = std.fs.path.join(allocator, &.{ zagent_root, ".zagent", "agents", agent }) catch return ToolResult.fail("Error: OOM");
     defer allocator.free(agent_path);
 
     if (exe_path.len == 0) return ToolResult.fail(std.fmt.allocPrint(allocator, "Error: exe_path not set", .{}) catch "Error: OOM");
@@ -88,7 +176,7 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
 
     const result = if (resolved) |content|
         std.process.run(allocator, io, .{
-            .argv = &.{ exe_path, "--agent-content", content, marker_arg, task },
+            .argv = &.{ exe_path, "--agent-prompt", content, marker_arg, perm_flag, effective_task },
             .stdout_limit = .unlimited,
             .stderr_limit = .unlimited,
         }) catch |err| {
@@ -96,7 +184,7 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
     }
     else
         std.process.run(allocator, io, .{
-            .argv = &.{ exe_path, "--agent", agent_path, marker_arg, task },
+            .argv = &.{ exe_path, "--agent", agent_path, marker_arg, perm_flag, effective_task },
             .stdout_limit = .unlimited,
             .stderr_limit = .unlimited,
         }) catch |err| {
@@ -143,10 +231,11 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
 
 pub fn renderResult(allocator: std.mem.Allocator, stdout: *std.Io.Writer, json_str: []const u8) !void {
     if (!std.mem.startsWith(u8, json_str, "{")) return stdout.print("  → {s}\n", .{json_str});
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, json_str, .{}) catch {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch {
         return stdout.print("  → {s}\n", .{json_str});
     };
-    const obj = parsed.object;
+    defer parsed.deinit();
+    const obj = parsed.value.object;
     const agent = if (obj.get("agent")) |v| if (v == .string) v.string else "" else "";
     const content = if (obj.get("content")) |v| if (v == .string) v.string else "" else "";
     if (agent.len > 0) try stdout.print("  [{s}]\n", .{agent});
@@ -184,6 +273,28 @@ test "task execute: missing agent returns error" {
     defer testing.allocator.free(tr.output);
     try testing.expect(!tr.success);
     try testing.expect(std.mem.startsWith(u8, tr.output, "Error:"));
+}
+
+test "task execute: empty files array does not crash" {
+    const testing = std.testing;
+    const json_str = "{\"agent\":\"explore\",\"task\":\"test\",\"files\":[]}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json_str, .{});
+    defer parsed.deinit();
+    const tr = execute(testing.allocator, testing.io, parsed.value);
+    defer testing.allocator.free(tr.output);
+    try testing.expect(!tr.success);
+}
+
+test "task execute: nonexistent file in files is handled gracefully" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    const json_str = try std.fmt.allocPrint(a, "{{\"agent\":\"explore\",\"task\":\"test\",\"files\":[\"{s}\"]}}", .{"nonexistent-task-file-xyz"});
+    defer a.free(json_str);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json_str, .{});
+    defer parsed.deinit();
+    const tr = execute(a, testing.io, parsed.value);
+    defer a.free(tr.output);
+    try testing.expect(!tr.success);
 }
 
 test "task execute: missing task returns error" {

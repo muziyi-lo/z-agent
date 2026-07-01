@@ -32,6 +32,10 @@ pub const ProviderEntry = struct {
     default_context_limit: u32,
     default_max_tokens: u32,
     default_base_url: []const u8,
+    /// TCP+TLS connect timeout per provider
+    connect_timeout_secs: ?u32 = null,
+    /// total request timeout per provider
+    max_timeout_secs: ?u32 = null,
     create: *const fn (config: types.ModelConfig, tools: ?[]const types.Tool, debug_logging: bool, arena: std.mem.Allocator) Provider,
     modelSpec: *const fn (model: []const u8) ?types.ModelSpec,
 };

@@ -31,10 +31,11 @@ pub const Registry = struct {
     pub fn execute(self: Registry, allocator: std.mem.Allocator, io: std.Io, tc: types.ToolCall) ToolResult {
         for (self.handlers) |h| {
             if (std.mem.eql(u8, h.name, tc.name)) {
-                const args = std.json.parseFromSliceLeaky(std.json.Value, allocator, tc.arguments, .{}) catch |err| {
+                var parsed = std.json.parseFromSlice(std.json.Value, allocator, tc.arguments, .{}) catch |err| {
                     return ToolResult.fail(std.fmt.allocPrint(allocator, "Error: invalid arguments JSON: {}", .{err}) catch "Error: OOM");
                 };
-                const tr = h.execute(allocator, io, args);
+                defer parsed.deinit();
+                const tr = h.execute(allocator, io, parsed.value);
                 const r = trunc.truncateBytes(tr.output, MAX_OUTPUT_BYTES);
                 if (!r.truncated) return tr;
                 const dup = allocator.dupe(u8, r.text) catch return ToolResult.fail("Error: OOM");

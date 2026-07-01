@@ -53,8 +53,9 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
         while (lines.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \r");
             if (trimmed.len == 0) continue;
-            if (std.json.parseFromSliceLeaky(std.json.Value, allocator, trimmed, .{})) |parsed| {
-                const obj = parsed.object;
+            if (std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{})) |parsed| {
+                defer parsed.deinit();
+                const obj = parsed.value.object;
                 if (obj.get("role")) |role_val| {
                     const role = role_val.string;
                     const content = if (obj.get("content")) |c| blk: {

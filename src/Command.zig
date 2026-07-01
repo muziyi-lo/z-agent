@@ -6,15 +6,42 @@ const embedded_init =
     \\description: Analyze project and write a concise AGENTS.md
     \\args: (optional extra instructions)
     \\---
-    \\Write AGENTS.md following these rules strictly:
+    \\## How to investigate
     \\
-    \\- Every line must answer: "Would an agent miss this without help?" If no, delete it.
-    \\- Use markdown sections (## Constraint, ## Build, etc.) with tables and bullet lists — structured but concise.
-    \\- NO directory trees, file tables, or file-name catalogs. Structure section: a single sentence naming ONLY registration points (where agents add tools/providers).
-    \\- Only project-specific rules. Skip generic language advice (naming, error handling, imports, memory patterns).
-    \\- Build & test: exact commands copied from build files, no explanations.
-    \\- If an existing AGENTS.md exists, read it first. Improve it, don't replace blindly.
-    \\- If you can't verify a constraint from the codebase, omit it.
+    \\Read the highest-value sources first:
+    \\- README, build config, lockfiles
+    \\- CI workflows and task runner config
+    \\- existing instruction files (AGENTS.md, CLAUDE.md)
+    \\- representative code files for architecture
+    \\
+    \\Prefer executable sources of truth over prose.
+    \\
+    \\Avoid reading generated or dependency directories (zig-cache, node_modules, .git, target, dist, build, .next). Use glob with -Depth N or grep with -Path/-Filter to keep searches bounded.
+    \\
+    \\## What to extract
+    \\
+    \\Look for high-signal facts an agent would miss:
+    \\- exact developer commands, especially non-obvious ones
+    \\- how to run a single test
+    \\- monorepo boundaries and entrypoints
+    \\- framework or toolchain quirks
+    \\- testing quirks: fixtures, integration prerequisites
+    \\- repo-specific conventions that differ from defaults
+    \\
+    \\Good AGENTS.md content is hard-earned context that took multiple files to infer.
+    \\
+    \\## Writing rules
+    \\
+    \\Every line must answer: "Would an agent miss this without help?" If no, delete it.
+    \\Only project-specific rules. Skip generic language advice.
+    \\NO directory trees or file catalogs.
+    \\If existing AGENTS.md exists, improve it in place, don't replace blindly.
+    \\
+    \\## Questions
+    \\
+    \\Only ask the user if the repo cannot answer something important.
+    \\Use the question tool for at most one short batch.
+    \\
     \\${args}
 ;
 
@@ -348,11 +375,16 @@ test "Commands.match: built-in actions" {
     const testing = std.testing;
     const a = testing.allocator;
     var cmds = try Commands.init(a, testing.io);
+    defer cmds.deinit(a);
 
     try testing.expect(cmds.match(a, "/list") != null);
     try testing.expect(cmds.match(a, "/list") != null and cmds.match(a, "/list").? == .list);
     try testing.expect(cmds.match(a, "/new") != null);
-    try testing.expect(cmds.match(a, "/name foo") != null);
+    {
+        const m = cmds.match(a, "/name foo");
+        try testing.expect(m != null);
+        if (m) |v| if (v == .name) a.free(v.name);
+    }
     try testing.expect(cmds.match(a, "/name") == null);
     try testing.expect(cmds.match(a, "/exit") == null); // handled by caller
 }
@@ -361,6 +393,7 @@ test "Commands.match: unknown returns null" {
     const testing = std.testing;
     const a = testing.allocator;
     var cmds = try Commands.init(a, testing.io);
+    defer cmds.deinit(a);
     try testing.expect(cmds.match(a, "/unknown") == null);
     try testing.expect(cmds.match(a, "hello world") == null);
 }
@@ -369,6 +402,7 @@ test "Commands.match: exact command only" {
     const testing = std.testing;
     const a = testing.allocator;
     var cmds = try Commands.init(a, testing.io);
+    defer cmds.deinit(a);
     try testing.expect(cmds.match(a, "/new-session") == null); // not a fuzzy match
 }
 
@@ -390,32 +424,63 @@ test "buildTemplate: no placeholder returns original" {
     try testing.expectEqualStrings("hello world", result);
 }
 
+test "Commands.init: /init template contains investigation methodology" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    var cmds = try Commands.init(a, testing.io);
+    defer cmds.deinit(a);
+
+    const m = cmds.match(a, "/init");
+    try testing.expect(m != null);
+    try testing.expect(m.? == .template);
+    const prompt = m.?.template;
+    defer a.free(prompt);
+
+    try testing.expect(std.mem.indexOf(u8, prompt, "How to investigate") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "What to extract") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Writing rules") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Questions") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zig-cache") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Would an agent miss") != null);
+}
+
 test "Commands.init: embedded learn/recall/summary templates exist" {
     const testing = std.testing;
     const a = testing.allocator;
     var cmds = try Commands.init(a, testing.io);
+    defer cmds.deinit(a);
 
     // /learn template should be present
-    const learn_match = cmds.match(a, "/learn");
-    try testing.expect(learn_match != null);
-    try testing.expect(learn_match.? == .template);
-    try testing.expect(learn_match.?.template.len > 0);
+    {
+        const m = cmds.match(a, "/learn");
+        try testing.expect(m != null);
+        try testing.expect(m.? == .template);
+        try testing.expect(m.?.template.len > 0);
+        a.free(m.?.template);
+    }
 
     // /recall template
-    const recall_match = cmds.match(a, "/recall");
-    try testing.expect(recall_match != null);
-    try testing.expect(recall_match.? == .template);
+    {
+        const m = cmds.match(a, "/recall");
+        try testing.expect(m != null);
+        try testing.expect(m.? == .template);
+        a.free(m.?.template);
+    }
 
     // /summary template
-    const summary_match = cmds.match(a, "/summary");
-    try testing.expect(summary_match != null);
-    try testing.expect(summary_match.? == .template);
+    {
+        const m = cmds.match(a, "/summary");
+        try testing.expect(m != null);
+        try testing.expect(m.? == .template);
+        a.free(m.?.template);
+    }
 }
 
 test "Commands.match: /learn with args replaces placeholder" {
     const testing = std.testing;
     const a = testing.allocator;
     var cmds = try Commands.init(a, testing.io);
+    defer cmds.deinit(a);
 
     const match = cmds.match(a, "/learn 关注性能优化");
     try testing.expect(match != null);

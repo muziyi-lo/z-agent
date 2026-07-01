@@ -25,8 +25,10 @@ const Command = @import("Command.zig");
 const signal = @import("signal.zig");
 const hook = @import("hook.zig");
 const compact = @import("compact.zig");
-    const permission = @import("permission.zig");
-    const ToolResult = registry.ToolResult;
+const agent = @import("agent.zig");
+const permission = @import("permission.zig");
+const picker = @import("picker.zig");
+const ToolResult = registry.ToolResult;
 
 const default_handlers = &.{
     registry.buildHandler(tool_read),
@@ -61,6 +63,7 @@ pub const App = struct {
     _session_arg: ?[]const u8,
     commands: Command.Commands,
     agents_md: ?[]const u8,
+    agent_prompt: ?[]const u8 = null,
     available_skills: []const types.SkillMeta,
     agent_mode: bool = false,
     result_marker: ?[]const u8 = null,
@@ -132,7 +135,8 @@ pub const App = struct {
             }
         }
         
-        var agents_md = readAgentsMd(arena, project_root, io);
+        const agents_md = readAgentsMd(arena, project_root, io);
+        var agent_prompt: ?[]const u8 = null;
         const skills_root = try std.fs.path.join(arena, &.{ project_root, ".zagent", "skills" });
         const fs_skills = try skill.loadAvailable(arena, io, skills_root);
         const builtin_skills = try skill.getBuiltinSkills(arena);
@@ -207,6 +211,8 @@ pub const App = struct {
             .api_key = api_key,
             .max_tokens = cfg.max_tokens,
             .proxy = cfg.proxy,
+            .connect_timeout_secs = prov_entry.connect_timeout_secs,
+            .max_timeout_secs = prov_entry.max_timeout_secs,
         };
         const prov = prov_entry.create(model_config, tools_slice, debug_logging, arena);
 
@@ -249,19 +255,18 @@ pub const App = struct {
                     }
                     is_agent = true;
                     const agent_file = args[i];
-                    const agent_content = readAgentFile(arena, io, agent_file);
-                    agents_md = if (agents_md != null) agents_md else agent_content;
+                    agent_prompt = readAgentFile(arena, io, agent_file);
                     continue;
                 }
-                if (std.mem.eql(u8, arg, "--agent-content")) {
+                if (std.mem.eql(u8, arg, "--agent-prompt")) {
                     i += 1;
                     if (i >= args.len) {
-                        try stdout.print("Error: --agent-content requires a content argument\n", .{});
+                        try stdout.print("Error: --agent-prompt requires a content argument\n", .{});
                         try stdout.flush();
-                        return error.MissingAgentArg;
+                        return error.MissingAgentPromptArg;
                     }
                     is_agent = true;
-                    agents_md = try arena.dupe(u8, args[i]);
+                    agent_prompt = try arena.dupe(u8, args[i]);
                     continue;
                 }
                 if (std.mem.startsWith(u8, arg, "--result-marker=")) {
@@ -272,6 +277,20 @@ pub const App = struct {
                     trust = true;
                     continue;
                 }
+                if (std.mem.eql(u8, arg, "--readonly")) {
+                    perm_ptr.readonly = true;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--model")) {
+                    i += 1;
+                    if (i >= args.len) {
+                        try stdout.print("Error: --model requires an argument (e.g. deepseek/deepseek-v4-flash)\n", .{});
+                        try stdout.flush();
+                        return error.MissingModelArg;
+                    }
+                    cfg.default_model = try arena.dupe(u8, args[i]);
+                    continue;
+                }
                 if (std.mem.startsWith(u8, arg, "-")) {
                     try stdout.print("Error: unknown flag {s}\n", .{arg});
                     try stdout.flush();
@@ -280,6 +299,11 @@ pub const App = struct {
                 prompt = arg;
                 break;
             }
+        }
+
+        if (perm_ptr.readonly) {
+            try stdout.print("{s}[只读模式]{s} 写操作（write/edit/bash/task/ask_user/memory）已被禁止\n", .{ ansi.C.yellow, ansi.C.reset });
+            try stdout.flush();
         }
 
         const commands = try Command.Commands.init(arena, io);
@@ -311,6 +335,7 @@ pub const App = struct {
             ._session_arg = session_arg,
             .commands = commands,
             .agents_md = agents_md,
+            .agent_prompt = agent_prompt,
             .available_skills = available_skills,
             .agent_mode = is_agent,
             .result_marker = result_marker,
@@ -376,6 +401,8 @@ pub const App = struct {
                         .api = new_api, .model = model_dup, .base_url = prov_cfg.base_url,
                         .api_key = api_key, .max_tokens = self.cfg.max_tokens,
                         .proxy = self.cfg.proxy,
+                        .connect_timeout_secs = pe.connect_timeout_secs,
+                        .max_timeout_secs = pe.max_timeout_secs,
                     };
                     self.prov = pe.create(new_config, self.tools, self.debug_logging, self.allocator);
                 } else {
@@ -416,10 +443,26 @@ pub const App = struct {
             for (ctx) |msg| try msg_buf.append(msg);
         }
 
-        const sys_text = try system.buildSystemPrompt(self.allocator, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills);
+        const sys_text = try system.buildSystemPrompt(self.allocator, self.project_root, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills, system.detectModelFamily(self.model), self.agent_prompt);
         try msg_buf.insert(0, types.Message{ .role = .system, .content = try allocContent(self.allocator, sys_text) });
         try msg_buf.append(types.Message{ .role = .user, .content = try allocContent(self.allocator, prompt) });
-        try self.agentLoop(&msg_buf, sm);
+        try agent.agentLoop(
+            self.allocator,
+            self.io,
+            self.stdout,
+            self.prov,
+            self.reg,
+            self.perm,
+            sm,
+            &msg_buf,
+            self.context_limit,
+            self.cfg.max_tokens,
+            self.agent_mode,
+            self.result_marker,
+            self.trust,
+            self.debug_logging,
+            self.project_root,
+        );
     }
 
     fn repl(self: *App, sm: *session.SessionManager) !void {
@@ -431,7 +474,7 @@ pub const App = struct {
             try self.stdout.print("\n(会话已恢复: {d} 条消息)\n", .{ctx.len});
         }
 
-        const sys_text = try system.buildSystemPrompt(self.allocator, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills);
+        const sys_text = try system.buildSystemPrompt(self.allocator, self.project_root, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills, system.detectModelFamily(self.model), self.agent_prompt);
         try msg_buf.insert(0, types.Message{ .role = .system, .content = try allocContent(self.allocator, sys_text) });
 
         try self.stdout.print("\nEntering interactive mode. Type /help for commands.\n\n", .{});
@@ -452,9 +495,10 @@ pub const App = struct {
             defer self.allocator.free(line);
             if (line.len == 0) continue;
 
-            const submit_payload = std.fmt.allocPrint(self.allocator, "{{\"text\":\"{s}\"}}", .{line}) catch "{}";
-            defer self.allocator.free(submit_payload);
-            hook.run(self.allocator, self.io, self.project_root, "user_prompt_submit", submit_payload, self.stdout);
+            if (std.fmt.allocPrint(self.allocator, "{{\"text\":\"{s}\"}}", .{line})) |submit_payload| {
+                defer self.allocator.free(submit_payload);
+                hook.run(self.allocator, self.io, self.project_root, "user_prompt_submit", submit_payload, self.stdout);
+            } else |_| {}
 
             if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) {
                 hook.run(self.allocator, self.io, self.project_root, "session_end", "{}", self.stdout);
@@ -479,7 +523,7 @@ pub const App = struct {
                         sm.* = try session.SessionManager.create(self.allocator, self.io, sd, self.model, self.api);
                         msg_buf.clearAndFree();
                         msg_buf = std.array_list.Managed(types.Message).init(self.allocator);
-                        const fresh_sys = try system.buildSystemPrompt(self.allocator, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills);
+                        const fresh_sys = try system.buildSystemPrompt(self.allocator, self.project_root, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills, system.detectModelFamily(self.model), self.agent_prompt);
                         try msg_buf.insert(0, types.Message{ .role = .system, .content = try allocContent(self.allocator, fresh_sys) });
                         try self.stdout.print("\n新会话已创建。\n\n", .{});
                         try self.stdout.flush();
@@ -506,7 +550,7 @@ pub const App = struct {
                             restored = ctx.len;
                             for (ctx) |msg| try msg_buf.append(msg);
                         }
-                        const fresh_sys = try system.buildSystemPrompt(self.allocator, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills);
+                        const fresh_sys = try system.buildSystemPrompt(self.allocator, self.project_root, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills, system.detectModelFamily(self.model), self.agent_prompt);
                         try msg_buf.insert(0, types.Message{ .role = .system, .content = try allocContent(self.allocator, fresh_sys) });
                         try self.stdout.print("\n已切换到会话 ({d} 条消息):\n", .{restored});
                         for (msg_buf.items[1..]) |msg| {
@@ -571,14 +615,10 @@ pub const App = struct {
                             try self.stdout.print("\n⚠ 上下文溢出预警:\n", .{});
                             try self.stdout.print("  当前消息: {d} 条 / 约 {d} tokens\n", .{ msg_buf.items.len, est });
                             try self.stdout.print("  新模型窗口: {d} tokens (阈值 {d})\n", .{ self.context_limit, threshold });
-                            try self.stdout.print("  超出 {d} tokens，消息将被截断。继续? [y/N] ", .{est -| threshold});
+                            try self.stdout.print("  超出 {d} tokens，消息将被截断\n", .{est -| threshold});
                             try self.stdout.flush();
-                            const answer = readlineConfirm(self) catch |err| {
-                                self.model = old_model;
-                                self.prov.setModel(old_model);
-                                return err;
-                            };
-                            if (answer.len == 0 or (answer[0] != 'y' and answer[0] != 'Y')) {
+                            const choice = picker.select(self.allocator, self.io, self.stdout, "  继续?", &.{"继续", "取消"}, 1) catch null;
+                            if (choice == null or choice.? == 1) {
                                 self.model = old_model;
                                 self.prov.setModel(old_model);
                                 try self.stdout.print("已取消。\n", .{});
@@ -589,7 +629,7 @@ pub const App = struct {
 
                         try sm.updateHeader(self.model, self.api);
 
-                        const fresh_sys = try system.buildSystemPrompt(self.allocator, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills);
+                        const fresh_sys = try system.buildSystemPrompt(self.allocator, self.project_root, self.project_root, self.api, self.model, self.io, self.agents_md, self.available_skills, system.detectModelFamily(self.model), self.agent_prompt);
                         msg_buf.clearRetainingCapacity();
                         try msg_buf.insert(0, types.Message{ .role = .system, .content = try allocContent(self.allocator, fresh_sys) });
                         continue;
@@ -601,7 +641,23 @@ pub const App = struct {
                         const user_msg = types.Message{ .role = .user, .content = try allocContent(self.allocator, user_content) };
                         try msg_buf.append(user_msg);
                         try sm.appendMessage(msg_buf.items[msg_buf.items.len - 1]);
-                        try self.agentLoop(&msg_buf, sm);
+                        try agent.agentLoop(
+                            self.allocator,
+                            self.io,
+                            self.stdout,
+                            self.prov,
+                            self.reg,
+                            self.perm,
+                            sm,
+                            &msg_buf,
+                            self.context_limit,
+                            self.cfg.max_tokens,
+                            self.agent_mode,
+                            self.result_marker,
+                            self.trust,
+                            self.debug_logging,
+                            self.project_root,
+                        );
                         continue;
                     },
                 }
@@ -613,227 +669,27 @@ pub const App = struct {
             try msg_buf.append(user_msg);
             try sm.appendMessage(msg_buf.items[msg_buf.items.len - 1]);
 
-            try self.agentLoop(&msg_buf, sm);
+            try agent.agentLoop(
+                self.allocator,
+                self.io,
+                self.stdout,
+                self.prov,
+                self.reg,
+                self.perm,
+                sm,
+                &msg_buf,
+                self.context_limit,
+                self.cfg.max_tokens,
+                self.agent_mode,
+                self.result_marker,
+                self.trust,
+                self.debug_logging,
+                self.project_root,
+            );
         }
     }
 
-    fn agentLoop(self: *App, messages: *std.array_list.Managed(types.Message), sm: *session.SessionManager) !void {
-        var tool_rounds: u32 = 0;
-        var actual_total_tokens: ?u32 = null;
-        while (tool_rounds < 10) : (tool_rounds += 1) {
-            const compact_result = try compact.compact(self.allocator, self.io, self.prov, messages, self.context_limit, self.cfg.max_tokens, self.stdout);
-            if (compact_result) |info| {
-                try self.stdout.print("\n{s}[压缩]{s} 保留 {d} 条消息, 生成摘要 ({d} 条丢弃)\n", .{ ansi.C.cyan, ansi.C.reset, info.keep_count, info.dropped_count });
-                try self.stdout.flush();
-                try sm.appendCompaction(info.summary, info.keep_count, info.tokens_before);
-                try sm.flushFile();
-            }
 
-            const response = callWithRetry(self.prov, self.allocator, self.io, messages.items, self.stdout) catch |err| {
-                    if (err == error.Interrupted) {
-                        try self.stdout.print("\n{s}[中断]{s} 操作被用户取消\n", .{ ansi.C.yellow, ansi.C.reset });
-                    try self.stdout.flush();
-                    signal.reset();
-                    return;
-                }
-                try self.stdout.print("\n{s}[错误]{s} API 调用失败: {}，已重试 3 次\n", .{ ansi.C.red, ansi.C.reset, err });
-                try self.stdout.flush();
-                return;
-            };
-            if (response.usage) |u| actual_total_tokens = u.total_tokens;
-            try self.stdout.print("\n", .{});
-            try self.stdout.flush();
-
-            if (response.tool_calls) |tcs| {
-                const now_ns = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-                const assistant_msg = types.Message{
-                    .role = .assistant, .content = null, .tool_calls = tcs,
-                    .reasoning = response.reasoning, .timestamp_ns = now_ns,
-                };
-                try messages.append(assistant_msg);
-                try sm.appendMessage(messages.items[messages.items.len - 1]);
-                if (!sm.flushed) try sm.flushFile();
-
-                for (tcs) |tc| {
-                    try printToolCall(self.stdout, self.allocator, tc.name, tc.arguments);
-                    try self.stdout.flush();
-                    if (std.mem.eql(u8, tc.name, "task")) {
-                        if (std.json.parseFromSlice(std.json.Value, self.allocator, tc.arguments, .{})) |parsed_val| {
-                            defer parsed_val.deinit();
-                            const parsed = parsed_val.value;
-                            if (parsed.object.get("agent")) |a| {
-                                try self.stdout.print("  {s}[{s}]{s} 正在执行任务...\n", .{ ansi.C.cyan, a.string, ansi.C.reset });
-                                try self.stdout.flush();
-                            }
-                        } else |_| {}
-                    }
-                    const start_ns = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-                    var result: []const u8 = undefined;
-                    var skip_result: ?[]const u8 = null;
-                    var is_error: bool = false;
-
-                    const is_modify = std.mem.eql(u8, tc.name, "write_file") or std.mem.eql(u8, tc.name, "edit_file") or std.mem.eql(u8, tc.name, "bash") or std.mem.eql(u8, tc.name, "task");
-                    if (is_modify) {
-                        const hook_payload = std.fmt.allocPrint(self.allocator, "{{\"tool\":\"{s}\",\"args\":{s}}}", .{ tc.name, tc.arguments }) catch "{}";
-                        defer self.allocator.free(hook_payload);
-                        if (!hook.runIntercept(self.allocator, self.io, self.project_root, "pre_tool_use", hook_payload, self.stdout)) {
-                            skip_result = std.fmt.allocPrint(self.allocator, "Error: hook blocked {s}", .{tc.name}) catch "Error: blocked";
-                            result = skip_result.?;
-                            is_error = true;
-                            const end_ns = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-                            const duration_ms = @as(u32, @intCast(@divFloor(end_ns - start_ns, 1_000_000)));
-                            const tool_content = try allocContentTool(self.allocator, result, tc.id, tc.name, duration_ms, is_error);
-                            const tool_msg = types.Message{ .role = .tool, .tool_call_id = tc.id, .content = tool_content, .timestamp_ns = end_ns };
-                            try messages.append(tool_msg);
-                            try sm.appendMessage(messages.items[messages.items.len - 1]);
-                            continue;
-                        }
-                    }
-                    if (std.mem.eql(u8, tc.name, "write_file") or std.mem.eql(u8, tc.name, "edit_file")) {
-                        const parsed = if (std.json.parseFromSlice(std.json.Value, self.allocator, tc.arguments, .{})) |v| v else |_| null: {
-                            break :null null;
-                        };
-                        defer if (parsed) |p| p.deinit();
-                        const tool_path = if (parsed) |p| blk: {
-                            break :blk if (p.value.object.get("path")) |path_val| if (path_val == .string) path_val.string else "" else "";
-                        } else "";
-                        const path_dup = try self.allocator.dupe(u8, tool_path);
-                        defer self.allocator.free(path_dup);
-                        const action = self.perm.check(tc.name, path_dup, null, self.trust);
-                        switch (action) {
-                            .deny => {
-                                skip_result = std.fmt.allocPrint(self.allocator, "Error: permission denied for {s} on '{s}'", .{ tc.name, path_dup }) catch "Error: denied";
-                                result = skip_result.?;
-                                is_error = true;
-                            },
-                            .allow => {
-                                const tool_result = self.reg.execute(self.allocator, self.io, tc);
-                                result = tool_result.output;
-                                is_error = !tool_result.success;
-                            },
-                            .confirm => {
-                                try self.stdout.print("  {s}[确认]{s} {s} → 即将执行。继续? [y/N] ", .{ ansi.C.yellow, ansi.C.reset, path_dup });
-                                try self.stdout.flush();
-                                const answer = readlineConfirm(self) catch "";
-                                if (answer.len == 0 or (answer[0] != 'y' and answer[0] != 'Y')) {
-                                    skip_result = std.fmt.allocPrint(self.allocator, "Error: user declined {s} on '{s}'", .{ tc.name, path_dup }) catch "Error: user declined";
-                                    result = skip_result.?;
-                                    is_error = true;
-                                } else {
-                                    const tool_result = self.reg.execute(self.allocator, self.io, tc);
-                                    result = tool_result.output;
-                                    is_error = !tool_result.success;
-                                }
-                            },
-                        }
-                    } else if (std.mem.eql(u8, tc.name, "bash")) {
-                        const action = if (std.json.parseFromSlice(std.json.Value, self.allocator, tc.arguments, .{})) |parsed_val| blk: {
-                            defer parsed_val.deinit();
-                            const cmd = if (parsed_val.value.object.get("command")) |c| if (c == .string) c.string else "" else "";
-                            break :blk self.perm.check(tc.name, null, cmd, self.trust);
-                        } else |_|
-                            self.perm.check(tc.name, null, null, self.trust)
-                        ;
-                        switch (action) {
-                            .deny => {
-                                skip_result = "Error: permission denied for bash";
-                                result = skip_result.?;
-                                is_error = true;
-                            },
-                            .allow, .confirm => {
-                                const tool_result = self.reg.execute(self.allocator, self.io, tc);
-                                result = tool_result.output;
-                                is_error = !tool_result.success;
-                            },
-                        }
-                    } else if (std.mem.eql(u8, tc.name, "task")) {
-                        const action = self.perm.check(tc.name, null, null, self.trust);
-                        switch (action) {
-                            .deny => {
-                                skip_result = "Error: permission denied for task";
-                                result = skip_result.?;
-                                is_error = true;
-                            },
-                            .allow, .confirm => {
-                                const tool_result = self.reg.execute(self.allocator, self.io, tc);
-                                result = tool_result.output;
-                                is_error = !tool_result.success;
-                            },
-                        }
-                    } else {
-                        const tool_result = self.reg.execute(self.allocator, self.io, tc);
-                        result = tool_result.output;
-                        is_error = !tool_result.success;
-                    }
-                    const end_ns = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds;
-                    const duration_ms = @as(u32, @intCast(@divFloor(end_ns - start_ns, 1_000_000)));
-                    if (is_error) {
-                        try self.stdout.print("  {s}→ {s}{s}\n", .{ ansi.C.red, result, ansi.C.reset });
-                    } else if (self.reg.findHandler(tc.name)) |h| {
-                        if (h.renderResult) |rr| {
-                            rr(self.allocator, self.stdout, result) catch {};
-                        } else {
-                            printToolResult(self.allocator, self.stdout, tc.name, result) catch {};
-                        }
-                    } else {
-                        printToolResult(self.allocator, self.stdout, tc.name, result) catch {};
-                    }
-                    try self.stdout.flush();
-                    const tool_content = try allocContentTool(self.allocator, result, tc.id, tc.name, duration_ms, is_error);
-                    const tool_msg = types.Message{
-                        .role = .tool, .tool_call_id = tc.id, .content = tool_content, .timestamp_ns = end_ns,
-                    };
-                    try messages.append(tool_msg);
-                    try sm.appendMessage(messages.items[messages.items.len - 1]);
-
-                    if (std.mem.eql(u8, tc.name, "read_file")) {
-                        if (std.json.parseFromSlice(std.json.Value, self.allocator, result, .{})) |parsed_val| {
-                            defer parsed_val.deinit();
-                            const parsed = parsed_val.value;
-                            if (parsed.object.get("image")) |img_val| {
-                                if (img_val != .null) {
-                                    const uri = try self.allocator.dupe(u8, img_val.string);
-                                    const img_part = types.ContentPart{ .image_url = .{ .url = uri } };
-                                    const img_parts = try self.allocator.alloc(types.ContentPart, 1);
-                                    img_parts[0] = img_part;
-                                    const img_msg = types.Message{
-                                        .role = .user, .content = img_parts, .timestamp_ns = end_ns,
-                                    };
-                                    try messages.append(img_msg);
-                                    try sm.appendMessage(messages.items[messages.items.len - 1]);
-                                }
-                            }
-                        } else |_| {}
-                    }
-                    const hook_payload = std.fmt.allocPrint(self.allocator, "{{\"tool\":\"{s}\",\"duration_ms\":{d}}}", .{ tc.name, duration_ms }) catch "{}";
-                    defer self.allocator.free(hook_payload);
-                    hook.run(self.allocator, self.io, self.project_root, "post_tool_use", hook_payload, self.stdout);
-                }
-                continue;
-            }
-
-            if (response.content) |content| {
-                if (self.agent_mode) {
-                    if (self.result_marker) |mk| {
-                        try self.stdout.print("\n[ZAGENT_RESULT:{s}]{s}[ZAGENT_END:{s}]\n", .{ mk, content, mk });
-                    } else {
-                        try self.stdout.print("\n[ZAGENT_RESULT]{s}[ZAGENT_END]\n", .{content});
-                    }
-                }
-                const assistant_content = try self.allocator.dupe(u8, content);
-                errdefer self.allocator.free(assistant_content);
-                const reply_msg = types.Message{
-                    .role = .assistant, .content = try allocContent(self.allocator, assistant_content),
-                    .reasoning = response.reasoning,
-                    .timestamp_ns = std.Io.Clock.Timestamp.now(self.io, .real).raw.nanoseconds,
-                };
-                try messages.append(reply_msg);
-                try sm.appendMessage(messages.items[messages.items.len - 1]);
-                if (!sm.flushed) try sm.flushFile();
-            }
-            return;
-        }
-    }
 };
 
 fn readAgentsMd(allocator: std.mem.Allocator, project_root: []const u8, io: std.Io) ?[]const u8 {
@@ -876,40 +732,8 @@ fn allocContent(allocator: std.mem.Allocator, text: []const u8) ![]const types.C
     return arr;
 }
 
-fn allocContentTool(allocator: std.mem.Allocator, text: []const u8, id: []const u8, name: []const u8, duration_ms: u32, is_error: bool) ![]const types.ContentPart {
-    const arr = try allocator.alloc(types.ContentPart, 1);
-    arr[0] = .{ .tool_result = .{
-        .id = id, .content = text,
-        .is_error = is_error,
-        .name = name, .duration_ms = duration_ms,
-    } };
-    return arr;
-}
 
 
-
-fn callWithRetry(prov: provider.Provider, allocator: std.mem.Allocator, io: std.Io, messages: []const types.Message, stdout: *std.Io.Writer) !types.ChatResponse {
-    const max_retries: u32 = 3;
-    var last_err: ?anyerror = null;
-    var delay_ns: u64 = 1_000_000_000;
-
-    for (0..max_retries) |i| {
-        if (i > 0) {
-            try stdout.print("\n{s}[重试]{s} 第 {d}/{d} 次，等待 {d}s...\n", .{ ansi.C.yellow, ansi.C.reset, i + 1, max_retries, delay_ns / 1_000_000_000 });
-            try stdout.flush();
-            Cli.sleepMs(delay_ns / 1_000_000);
-            delay_ns *= 2;
-        }
-        const response = prov.chatCompletionStreaming(allocator, io, messages, stdout) catch |err| {
-            if (err == error.Interrupted) return error.Interrupted;
-            if (err == error.ApiError) return error.ApiError;
-            last_err = err;
-            continue;
-        };
-        return response;
-    }
-    return last_err.?;
-}
 
 fn readLine(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     var buf: [4096]u8 = undefined;
@@ -929,212 +753,5 @@ fn readLine(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     return error.EndOfStream;
 }
 
-fn readlineConfirm(self: *App) ![]const u8 {
-    var buf: [128]u8 = undefined;
-    const stdin_file = std.Io.File.stdin();
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = try stdin_file.readStreaming(self.io, &.{buf[total..]});
-        if (n == 0) break;
-        total += n;
-        for (buf[total - n .. total]) |c| {
-            if (c == '\n') {
-                const trimmed = std.mem.trim(u8, buf[0 .. total - 1], "\r");
-                return self.allocator.dupe(u8, trimmed);
-            }
-        }
-    }
-    return error.EndOfStream;
-}
 
-fn printToolCall(stdout: *std.Io.Writer, allocator: std.mem.Allocator, name: []const u8, args_json: []const u8) !void {
-    try stdout.print("{s}[工具]{s} {s}\n", .{ ansi.C.yellow, ansi.C.reset, name });
 
-    if (std.mem.eql(u8, name, "write_file")) {
-        var parsed_val = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch {
-            try stdout.print("  {s}\n", .{args_json});
-            return;
-        };
-        defer parsed_val.deinit();
-        const parsed = parsed_val.value;
-        const obj = parsed.object;
-        if (obj.get("path")) |p| {
-            try stdout.writeAll("  path: ");
-            try tool_json.prettyPrint(stdout, p, 4);
-            try stdout.writeByte('\n');
-        }
-        if (obj.get("content")) |c| {
-            if (c == .string) {
-                try stdout.writeAll("  content:\n");
-                var lines = std.mem.splitScalar(u8, c.string, '\n');
-                while (lines.next()) |ln| {
-                    try stdout.print("  | {s}\n", .{std.mem.trimEnd(u8, ln, "\r")});
-                }
-            }
-        }
-        return;
-    }
-
-    if (std.mem.eql(u8, name, "task")) {
-        var parsed_val = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch {
-            try stdout.print("  {s}\n", .{args_json});
-            return;
-        };
-        defer parsed_val.deinit();
-        const parsed = parsed_val.value;
-        const obj = parsed.object;
-        if (obj.get("agent")) |a| {
-            try stdout.writeAll("  agent: ");
-            try tool_json.prettyPrint(stdout, a, 4);
-            try stdout.writeByte('\n');
-        }
-        if (obj.get("task")) |t| {
-            if (t == .string) {
-                try stdout.writeAll("  task: ");
-                try stdout.print("{s}\n", .{t.string});
-            }
-        }
-        return;
-    }
-
-    if (std.mem.eql(u8, name, "ask_user")) {
-        var parsed_val = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch {
-            try stdout.print("  {s}\n", .{args_json});
-            return;
-        };
-        defer parsed_val.deinit();
-        const parsed = parsed_val.value;
-        if (parsed.object.get("question")) |q| {
-            if (q == .string) {
-                try stdout.print("  question: {s}\n", .{q.string});
-            }
-        }
-        return;
-    }
-
-    var parsed_val = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch {
-        try stdout.print("  {s}\n", .{args_json});
-        return;
-    };
-    defer parsed_val.deinit();
-    const parsed = parsed_val.value;
-    if (parsed == .object) {
-        var it = parsed.object.iterator();
-        while (it.next()) |entry| {
-            try stdout.print("  {s}: ", .{entry.key_ptr.*});
-            try tool_json.prettyPrint(stdout, entry.value_ptr.*, 4);
-            try stdout.print("\n", .{});
-        }
-    } else {
-        try stdout.writeAll("  ");
-        try tool_json.prettyPrint(stdout, parsed, 2);
-        try stdout.writeByte('\n');
-    }
-}
-
-fn printToolResult(allocator: std.mem.Allocator, stdout: *std.Io.Writer, tool_name: []const u8, json_str: []const u8) !void {
-    if (!std.mem.startsWith(u8, json_str, "{")) {
-        try stdout.print("  {s}→{s} {s}\n", .{ ansi.C.green, ansi.C.reset, json_str });
-        return;
-    }
-    var parsed_val = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch {
-        try stdout.print("  {s}→{s} {s}\n", .{ ansi.C.green, ansi.C.reset, json_str });
-        return;
-    };
-    defer parsed_val.deinit();
-    const parsed = parsed_val.value;
-    const obj = parsed.object;
-
-    if (std.mem.eql(u8, tool_name, "bash")) {
-        const exit_code = if (obj.get("exit_code")) |v| @as(i32, @intCast(v.integer)) else -1;
-        const so = if (obj.get("stdout")) |v| if (v == .string) v.string else "" else "";
-        const se = if (obj.get("stderr")) |v| if (v == .string) v.string else "" else "";
-        const icon = if (exit_code == 0) "✓" else "✗";
-        try stdout.print("  {s}{s}{s} exit:{d}\n", .{ if (exit_code == 0) ansi.C.green else ansi.C.red, icon, ansi.C.reset, exit_code });
-        if (so.len > 0) {
-            var lines = std.mem.splitScalar(u8, so, '\n');
-            while (lines.next()) |ln| {
-                const trimmed = std.mem.trim(u8, ln, "\r");
-                if (trimmed.len > 0) try stdout.print("  | {s}\n", .{trimmed});
-            }
-        }
-        if (se.len > 0) {
-            try stdout.print("  stderr:\n", .{});
-            var lines = std.mem.splitScalar(u8, se, '\n');
-            while (lines.next()) |ln| {
-                try stdout.print("  | {s}\n", .{std.mem.trimEnd(u8, ln, "\r")});
-            }
-        }
-        return;
-    }
-    if (std.mem.eql(u8, tool_name, "read_file")) {
-        const path = if (obj.get("path")) |v| if (v == .string) v.string else "" else "";
-        const content = if (obj.get("content")) |v| if (v == .string) v.string else "" else "";
-        const offset = if (obj.get("offset")) |v| if (v != .null) @as(u64, @intCast(@max(v.integer, 0))) else 0 else 0;
-        try stdout.print("  {s}", .{path});
-        if (offset > 0) try stdout.print("  offset:{d}", .{offset});
-        try stdout.print("\n", .{});
-        if (content.len > 0) {
-            var lines = std.mem.splitScalar(u8, content, '\n');
-            while (lines.next()) |ln| {
-                try stdout.print("  | {s}\n", .{std.mem.trimEnd(u8, ln, "\r")});
-            }
-        }
-        return;
-    }
-    if (std.mem.eql(u8, tool_name, "write_file")) {
-        const path = if (obj.get("path")) |v| if (v == .string) v.string else "" else "";
-        const bytes = if (obj.get("bytes")) |v| @as(u64, @intCast(@max(v.integer, 0))) else 0;
-        const preview = if (obj.get("content_preview")) |v| if (v == .string) v.string else "" else "";
-        try stdout.print("  ✓ 写入 {d} bytes → {s}\n", .{ bytes, path });
-        if (preview.len > 0) {
-            var lines = std.mem.splitScalar(u8, preview, '\n');
-            while (lines.next()) |ln| {
-                try stdout.print("  | {s}\n", .{std.mem.trimEnd(u8, ln, "\r")});
-            }
-        }
-        return;
-    }
-    if (std.mem.eql(u8, tool_name, "edit_file")) {
-        const path = if (obj.get("path")) |v| if (v == .string) v.string else "" else "";
-        const replacements = if (obj.get("replacements")) |v| @as(u64, @intCast(@max(v.integer, 0))) else 0;
-        try stdout.print("  ✓ 替换 {d} 处 → {s}\n", .{ replacements, path });
-        return;
-    }
-    if (std.mem.eql(u8, tool_name, "glob")) {
-        const pat = if (obj.get("pattern")) |v| if (v == .string) v.string else "" else "";
-        const count = if (obj.get("count")) |v| @as(u64, @intCast(@max(v.integer, 0))) else 0;
-        try stdout.print("  ✓ {d} matches for '{s}'\n", .{ count, pat });
-        if (obj.get("matches")) |m| {
-            if (m == .array) {
-                for (m.array.items) |match| {
-                    if (match == .string) try stdout.print("    {s}\n", .{match.string});
-                }
-            }
-        }
-        return;
-    }
-    if (std.mem.eql(u8, tool_name, "grep")) {
-        const pat = if (obj.get("pattern")) |v| if (v == .string) v.string else "" else "";
-        const count = if (obj.get("count")) |v| @as(u64, @intCast(@max(v.integer, 0))) else 0;
-        try stdout.print("  ✓ {d} matches for '{s}'\n", .{ count, pat });
-        if (obj.get("matches")) |m| {
-            if (m == .array) {
-                for (m.array.items) |match| {
-                    if (match == .string) try stdout.print("    {s}\n", .{match.string});
-                }
-            }
-        }
-        return;
-    }
-    if (std.mem.eql(u8, tool_name, "ask_user")) {
-        const q = if (obj.get("question")) |v| if (v == .string) v.string else "" else "";
-        const a = if (obj.get("answer")) |v| if (v == .string) v.string else "" else "";
-        try stdout.print("  问: {s}\n  答: {s}\n", .{ q, a });
-        return;
-    }
-
-    try stdout.writeAll("  ");
-    try tool_json.prettyPrint(stdout, parsed, 2);
-    try stdout.writeByte('\n');
-}

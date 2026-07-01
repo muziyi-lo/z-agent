@@ -70,9 +70,9 @@ packages/coding-agent/src/modes/interactive/theme/
 | 层 | 文档 | 状态 |
 |---|------|------|
 | 第一层 — 基础配色 | `ui-basic-colors.md` | ✅ **已完成**（commit `f3a6572`） |
-| 第二层 — 流式输出美化 | `ui-streaming.md` | 📋 方案待确认 |
-| 第三层 — 主题系统 | — | ⏳ 待规划 |
-| 第四层 — Markdown + 组件化 | — | ⏳ 待规划 |
+| 第二层 — 流式输出美化 | `ui-streaming.md` | ✅ **已完成**（commit `b3a4d41`） |
+| 第三层 — 主题系统 | — | ❌ 不做（复杂度不足，当前硬编码颜色够用） |
+| 第四层 — Markdown 渲染 | `ui-markdown.md` | ✅ **已完成**（段落级覆盖 + md2ansi 嵌入） |
 
 ## 核心策略
 

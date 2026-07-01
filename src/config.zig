@@ -17,6 +17,10 @@ pub const ProviderEntry = struct {
     max_tokens: u32,
     vision: bool,
     effort: []const u8,
+    /// TCP+TLS connect timeout per provider
+    connect_timeout_secs: ?u32 = null,
+    /// total request timeout per provider
+    max_timeout_secs: ?u32 = null,
 };
 
 /// Application configuration loaded from .zagent/config.toml
@@ -259,6 +263,15 @@ fn parseProviderEntry(allocator: std.mem.Allocator, t: *const std.StringArrayHas
     const mt: u32 = @intCast(@min(@max(raw_mt, 0), std.math.maxInt(u32)));
     const vision = getTomlBoolean(t.*, "vision") orelse false;
 
+    const raw_ct = getTomlInteger(t.*, "connect_timeout_secs");
+    const connect_timeout_secs: ?u32 = if (raw_ct) |v| blk: {
+        break :blk @intCast(@min(@max(v, 0), std.math.maxInt(u32)));
+    } else null;
+    const raw_mt_t = getTomlInteger(t.*, "max_timeout_secs");
+    const max_timeout_secs: ?u32 = if (raw_mt_t) |v| blk: {
+        break :blk @intCast(@min(@max(v, 0), std.math.maxInt(u32)));
+    } else null;
+
     // Parse models array
     var models_list = std.array_list.Managed([]const u8).init(allocator);
     errdefer {
@@ -290,6 +303,8 @@ fn parseProviderEntry(allocator: std.mem.Allocator, t: *const std.StringArrayHas
         .max_tokens = mt,
         .vision = vision,
         .effort = if (effort.len > 0) try allocator.dupe(u8, effort) else try allocator.dupe(u8, ""),
+        .connect_timeout_secs = connect_timeout_secs,
+        .max_timeout_secs = max_timeout_secs,
     };
 }
 
@@ -456,8 +471,8 @@ fn writeDefaultConfig(allocator: std.mem.Allocator, project_root: []const u8, io
 
     const default_content =
         \\# z-agent configuration
-        \\# 首次运行自动生成，按需修改
         \\
+        \\# Global defaults (overridden by provider-specific values below)
         \\default_model = "deepseek/deepseek-v4-flash"
         \\max_tokens = 4096
         \\
@@ -469,18 +484,32 @@ fn writeDefaultConfig(allocator: std.mem.Allocator, project_root: []const u8, io
         \\default_model = "deepseek-v4-flash"
         \\api_key_env = "DEEPSEEK_API_KEY"
         \\context_limit = 1048576
-        \\max_tokens = 8192
-        \\vision = true
-        \\effort = "high"
+        \\max_tokens = 8192       # DeepSeek actual max is 393216; increase as needed
+        \\connect_timeout_secs = 15   # TCP+TLS connect timeout (default 15)
+        \\max_timeout_secs = 60       # Total request timeout (default 60)
         \\
-        \\# 完整 [[providers]] 示例（取消注释即可使用）：
+        \\# Additional provider templates (uncomment and fill in):
         \\# [[providers]]
-        \\# name = "openai"
+        \\# name = "<provider-name>"
         \\# kind = "openai"
-        \\# base_url = "https://api.openai.com"
-        \\# models = ["gpt-4o"]
-        \\# api_key_env = "OPENAI_API_KEY"
-        \\# context_limit = 128000
+        \\# base_url = "<api-endpoint>"
+        \\# models = ["<model-name>"]
+        \\# default_model = "<model-name>"
+        \\# api_key_env = "<API_KEY_ENV_VAR>"
+        \\# context_limit = 0       # check provider docs
+        \\# max_tokens = 0          # check provider docs
+        \\# connect_timeout_secs = 15
+        \\# max_timeout_secs = 60
+        \\
+        \\# [[providers]]
+        \\# name = "ollama"
+        \\# kind = "openai"
+        \\# base_url = "http://localhost:11434/v1"
+        \\# models = ["llama3.1"]
+        \\# default_model = "llama3.1"
+        \\# api_key_env = "OLLAMA_API_KEY"
+        \\# context_limit = 131072
+        \\# max_tokens = 4096
         \\
         \\[permissions]
         \\mode = "confirm"
@@ -490,11 +519,11 @@ fn writeDefaultConfig(allocator: std.mem.Allocator, project_root: []const u8, io
         \\
         \\# [proxy]
         \\# mode = "auto"     # auto | env | custom | off
-        \\# url = "http://127.0.0.1:7890"   # custom mode 时必填
+        \\# url = "http://127.0.0.1:7890"   # required for custom mode
         \\# no_proxy = ["localhost", "127.0.0.1"]
         \\
-        \\# API Key 优先级: 内联 api_key > .zagent/.env > 环境变量
-        \\# 安全建议: 使用 .zagent/.env 文件（已 gitignored），不要直接写入 config.toml
+        \\# API key priority: inline api_key > .zagent/.env > environment variable
+        \\# Security: use .zagent/.env (gitignored), do NOT write keys into config.toml
     ;
 
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
@@ -927,4 +956,81 @@ test "config: parseProviderEntry with all fields" {
     try testing.expectEqual(@as(usize, 2), entry.models.len);
     try testing.expectEqualStrings("model-1", entry.models[0]);
     try testing.expectEqualStrings("model-2", entry.models[1]);
+}
+
+test "config: parseProviderEntry with timeout fields" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const toml_src =
+        \\[[providers]]
+        \\name = "timed"
+        \\kind = "openai"
+        \\base_url = "https://api.timed.com"
+        \\models = ["model-1"]
+        \\default_model = "model-1"
+        \\api_key_env = "TIMED_KEY"
+        \\context_limit = 65536
+        \\connect_timeout_secs = 30
+        \\max_timeout_secs = 120
+    ;
+
+    var parsed = try toml.parse(allocator, toml_src);
+    defer toml.freeTable(allocator, &parsed);
+
+    const providers_val = parsed.get("providers").?;
+    const elem = providers_val.array[0];
+    try testing.expect(elem == .table);
+
+    const entry = try parseProviderEntry(allocator, &elem.table);
+    defer {
+        allocator.free(entry.name);
+        allocator.free(entry.kind);
+        allocator.free(entry.base_url);
+        allocator.free(entry.default_model);
+        allocator.free(entry.api_key_env);
+        allocator.free(entry.api_key);
+        allocator.free(entry.effort);
+        for (entry.models) |m| allocator.free(m);
+        allocator.free(entry.models);
+    }
+
+    try testing.expectEqualStrings("timed", entry.name);
+    try testing.expect(entry.connect_timeout_secs != null);
+    try testing.expectEqual(@as(u32, 30), entry.connect_timeout_secs.?);
+    try testing.expect(entry.max_timeout_secs != null);
+    try testing.expectEqual(@as(u32, 120), entry.max_timeout_secs.?);
+}
+
+test "config: parseProviderEntry timeout fields default to null when missing" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const toml_src =
+        \\[[providers]]
+        \\name = "minimal"
+        \\
+    ;
+    var parsed = try toml.parse(allocator, toml_src);
+    defer toml.freeTable(allocator, &parsed);
+
+    const providers_val = parsed.get("providers").?;
+    const elem = providers_val.array[0];
+    try testing.expect(elem == .table);
+
+    const entry = try parseProviderEntry(allocator, &elem.table);
+    defer {
+        allocator.free(entry.name);
+        allocator.free(entry.kind);
+        allocator.free(entry.base_url);
+        allocator.free(entry.default_model);
+        allocator.free(entry.api_key_env);
+        allocator.free(entry.api_key);
+        allocator.free(entry.effort);
+        for (entry.models) |m| allocator.free(m);
+        allocator.free(entry.models);
+    }
+
+    try testing.expect(entry.connect_timeout_secs == null);
+    try testing.expect(entry.max_timeout_secs == null);
 }

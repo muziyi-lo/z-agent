@@ -1,8 +1,11 @@
 comptime {
+    _ = @import("types.zig");
     _ = @import("ansi.zig");
+    _ = @import("stream.zig");
     _ = @import("sse.zig");
     _ = @import("provider.zig");
     _ = @import("provider/common.zig");
+    _ = @import("provider/retry.zig");
     _ = @import("provider/openai_compat.zig");
     _ = @import("tool/registry.zig");
     _ = @import("tool/root_dir.zig");
@@ -31,4 +34,5 @@ comptime {
     _ = @import("tool/memory.zig");
     _ = @import("toml.zig");
     _ = @import("config.zig");
+    _ = @import("picker.zig");
 }

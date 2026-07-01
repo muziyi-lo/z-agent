@@ -38,6 +38,8 @@ pub fn buildProviderEntries(arena: std.mem.Allocator, cfg_providers: []const con
             .default_context_limit = p.context_limit,
             .default_max_tokens = p.max_tokens,
             .default_base_url = p.base_url,
+            .connect_timeout_secs = p.connect_timeout_secs,
+            .max_timeout_secs = p.max_timeout_secs,
             .create = impl.create,
             .modelSpec = impl.modelSpec,
         });

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const VERSION: []const u8 = "0.2.0";
+pub const VERSION: []const u8 = "0.3.0";
 
 pub const Role = enum {
     system,
@@ -63,6 +63,10 @@ pub const ModelConfig = struct {
     api_key: []const u8,
     max_tokens: ?u32 = null,
     proxy: ProxyConfig = .{},
+    /// TCP+TLS connect timeout (null = use default 15s)
+    connect_timeout_secs: ?u32 = null,
+    /// total request timeout (null = use default 60s)
+    max_timeout_secs: ?u32 = null,
 };
 
 pub const ModelSpec = struct {
@@ -102,3 +106,19 @@ pub const PermissionRule = struct {
     subject: ?[]const u8 = null,
     action: PermissionAction,
 };
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "ModelConfig: timeout fields default to null" {
+    const testing = std.testing;
+    const cfg = ModelConfig{
+        .api = "test",
+        .model = "test-model",
+        .base_url = "https://test.com",
+        .api_key = "sk-test",
+    };
+    try testing.expect(cfg.connect_timeout_secs == null);
+    try testing.expect(cfg.max_timeout_secs == null);
+}

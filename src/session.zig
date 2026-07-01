@@ -271,11 +271,15 @@ test "session: compaction skips entries before first_kept_index" {
     var sm = try SessionManager.create(a, testing.io, ".", "", "");
     defer sm.deinit();
 
+    var texts: [5][]const u8 = undefined;
     for (0..5) |i| {
         var c = try a.alloc(types.ContentPart, 1);
-        c[0] = .{ .text = try std.fmt.allocPrint(a, "msg{d}", .{i}) };
+        const t = try std.fmt.allocPrint(a, "msg{d}", .{i});
+        texts[i] = t;
+        c[0] = .{ .text = t };
         try sm.appendMessage(.{ .role = .user, .content = c });
     }
+    defer for (texts) |t| a.free(t);
     try sm.appendCompaction("compact", 3, 0);
     const ctx = try sm.buildContext();
     defer a.free(ctx);
@@ -288,6 +292,7 @@ test "session: message serialization round-trips through JSON" {
     const a = testing.allocator;
 
     var c = try a.alloc(types.ContentPart, 1);
+    defer a.free(c);
     c[0] = .{ .text = "hello world" };
     const msg = types.Message{ .role = .user, .content = c };
 
@@ -357,7 +362,44 @@ test "loadEntries: parses valid JSONL content" {
     const content = "{\"type\":\"session\",\"id\":\"test-session\",\"timestamp\":1000,\"cwd\":\".\",\"version\":1}\n" ++
         "{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}\n";
     const loaded = try serde.loadEntries(a, content);
-    defer loaded.entries.deinit();
+    defer {
+        for (loaded.entries.items) |entry| {
+            switch (entry) {
+                .message => |msg| {
+                    if (msg.content) |parts| {
+                        for (parts) |part| {
+                            switch (part) {
+                                .text => |t| a.free(t),
+                                .tool_result => |tr| {
+                                    if (tr.name) |n| a.free(n);
+                                    a.free(tr.id);
+                                    a.free(tr.content);
+                                },
+                                else => {},
+                            }
+                        }
+                        a.free(parts);
+                    }
+                    if (msg.tool_calls) |tcs| {
+                        for (tcs) |tc| {
+                            a.free(tc.id);
+                            a.free(tc.name);
+                            a.free(tc.arguments);
+                        }
+                        a.free(tcs);
+                    }
+                    if (msg.tool_call_id) |id| a.free(id);
+                    if (msg.reasoning) |r| a.free(r);
+                },
+                .compaction => |c| a.free(c.summary),
+            }
+        }
+        loaded.entries.deinit();
+        a.free(loaded.header.id);
+        a.free(loaded.header.cwd);
+        if (loaded.header.model) |m| a.free(m);
+        if (loaded.header.provider) |p| a.free(p);
+    }
     try testing.expectEqualStrings("test-session", loaded.header.id);
 }
 
@@ -398,6 +440,7 @@ test "serializeMessage: tool result includes name, duration_ms, is_error" {
     const a = testing.allocator;
 
     var c = try a.alloc(types.ContentPart, 1);
+    defer a.free(c);
     c[0] = .{ .tool_result = .{
         .id = "call_1",
         .content = "output",
@@ -421,6 +464,7 @@ test "serializeMessage: tool result without optional fields omits them" {
     const a = testing.allocator;
 
     var c = try a.alloc(types.ContentPart, 1);
+    defer a.free(c);
     c[0] = .{ .tool_result = .{ .id = "call_1", .content = "ok" } };
     const msg = types.Message{ .role = .tool, .content = c };
 
@@ -471,7 +515,26 @@ test "loadEntries: parses new fields from JSONL" {
     defer {
         for (loaded.entries.items) |e| {
             if (e == .message) {
-                if (e.message.content) |p| a.free(p);
+                if (e.message.content) |p| {
+                    for (p) |part| {
+                        switch (part) {
+                            .text => |t| a.free(t),
+                            .tool_result => |tr| {
+                                if (tr.name) |n| a.free(n);
+                                a.free(tr.id);
+                                a.free(tr.content);
+                            },
+                            else => {},
+                        }
+                    }
+                    a.free(p);
+                }
+                if (e.message.tool_calls) |tcs| {
+                    for (tcs) |tc| { a.free(tc.id); a.free(tc.name); a.free(tc.arguments); }
+                    a.free(tcs);
+                }
+                if (e.message.tool_call_id) |id| a.free(id);
+                if (e.message.reasoning) |r| a.free(r);
             }
         }
         loaded.entries.deinit();
@@ -519,16 +582,35 @@ test "loadEntries: last session header wins (supports model switches)" {
         "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"world\"}\n";
     const loaded = try serde.loadEntries(a, content);
     defer {
+        for (loaded.entries.items) |e| {
+            if (e == .message) {
+                if (e.message.content) |p| {
+                    for (p) |part| {
+                        switch (part) {
+                            .text => |t| a.free(t),
+                            .tool_result => |tr| {
+                                if (tr.name) |n| a.free(n);
+                                a.free(tr.id);
+                                a.free(tr.content);
+                            },
+                            else => {},
+                        }
+                    }
+                    a.free(p);
+                }
+                if (e.message.tool_calls) |tcs| {
+                    for (tcs) |tc| { a.free(tc.id); a.free(tc.name); a.free(tc.arguments); }
+                    a.free(tcs);
+                }
+                if (e.message.tool_call_id) |id| a.free(id);
+                if (e.message.reasoning) |r| a.free(r);
+            }
+        }
+        loaded.entries.deinit();
         a.free(loaded.header.id);
         a.free(loaded.header.cwd);
         if (loaded.header.model) |m| a.free(m);
         if (loaded.header.provider) |p| a.free(p);
-        for (loaded.entries.items) |e| {
-            if (e == .message) {
-                if (e.message.content) |p| a.free(p);
-            }
-        }
-        loaded.entries.deinit();
     }
     // Last header wins — should be second-session
     try testing.expectEqualStrings("second-session", loaded.header.id);
@@ -547,16 +629,35 @@ test "loadEntries: single session header unchanged" {
         "{\"type\":\"message\",\"role\":\"user\",\"content\":\"hi\"}\n";
     const loaded = try serde.loadEntries(a, content);
     defer {
+        for (loaded.entries.items) |e| {
+            if (e == .message) {
+                if (e.message.content) |p| {
+                    for (p) |part| {
+                        switch (part) {
+                            .text => |t| a.free(t),
+                            .tool_result => |tr| {
+                                if (tr.name) |n| a.free(n);
+                                a.free(tr.id);
+                                a.free(tr.content);
+                            },
+                            else => {},
+                        }
+                    }
+                    a.free(p);
+                }
+                if (e.message.tool_calls) |tcs| {
+                    for (tcs) |tc| { a.free(tc.id); a.free(tc.name); a.free(tc.arguments); }
+                    a.free(tcs);
+                }
+                if (e.message.tool_call_id) |id| a.free(id);
+                if (e.message.reasoning) |r| a.free(r);
+            }
+        }
+        loaded.entries.deinit();
         a.free(loaded.header.id);
         a.free(loaded.header.cwd);
         if (loaded.header.model) |m| a.free(m);
         if (loaded.header.provider) |p| a.free(p);
-        for (loaded.entries.items) |e| {
-            if (e == .message) {
-                if (e.message.content) |p| a.free(p);
-            }
-        }
-        loaded.entries.deinit();
     }
     try testing.expectEqualStrings("only-session", loaded.header.id);
     try testing.expectEqualStrings("gpt-4o", loaded.header.model.?);

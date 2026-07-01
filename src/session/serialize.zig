@@ -151,10 +151,11 @@ pub fn readSessionHeaderFromContent(allocator: std.mem.Allocator, content: []con
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, "\r");
         if (line.len == 0) continue;
-        const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, line, .{}) catch continue;
-        const type_val = parsed.object.get("type") orelse continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        const type_val = parsed.value.object.get("type") orelse continue;
         if (!std.mem.eql(u8, type_val.string, "session")) continue;
-        return parseSessionHeader(allocator, parsed);
+        return parseSessionHeader(allocator, parsed.value);
     }
     return error.MissingSessionHeader;
 }
@@ -185,12 +186,13 @@ pub fn loadEntries(allocator: std.mem.Allocator, content: []const u8) !struct { 
         const line = std.mem.trim(u8, raw_line, "\r");
         if (line.len == 0) continue;
 
-        const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, line, .{}) catch continue;
-        const type_val = parsed.object.get("type") orelse continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        defer parsed.deinit();
+        const type_val = parsed.value.object.get("type") orelse continue;
 
         if (std.mem.eql(u8, type_val.string, "session")) {
             // Last session header wins (supports model switches)
-            const new_header = parseSessionHeader(allocator, parsed) catch continue;
+            const new_header = parseSessionHeader(allocator, parsed.value) catch continue;
             if (header != null) {
                 allocator.free(header.?.id);
                 allocator.free(header.?.cwd);
@@ -202,9 +204,9 @@ pub fn loadEntries(allocator: std.mem.Allocator, content: []const u8) !struct { 
         }
 
         if (std.mem.eql(u8, type_val.string, "compaction")) {
-            const summary = if (parsed.object.get("summary")) |v| if (v == .string) v.string else "" else "";
-            const fki = if (parsed.object.get("first_kept_index")) |v| @as(usize, @intCast(@min(@max(v.integer, 0), std.math.maxInt(usize)))) else 0;
-            const tb = if (parsed.object.get("tokens_before")) |v| @as(u32, @intCast(@min(@max(v.integer, 0), std.math.maxInt(u32)))) else 0;
+            const summary = if (parsed.value.object.get("summary")) |v| if (v == .string) v.string else "" else "";
+            const fki = if (parsed.value.object.get("first_kept_index")) |v| @as(usize, @intCast(@min(@max(v.integer, 0), std.math.maxInt(usize)))) else 0;
+            const tb = if (parsed.value.object.get("tokens_before")) |v| @as(u32, @intCast(@min(@max(v.integer, 0), std.math.maxInt(u32)))) else 0;
             try entries.append(.{ .compaction = .{
                 .summary = try allocator.dupe(u8, summary),
                 .first_kept_index = fki,
@@ -215,19 +217,19 @@ pub fn loadEntries(allocator: std.mem.Allocator, content: []const u8) !struct { 
 
         if (!std.mem.eql(u8, type_val.string, "message")) continue;
 
-        const role_str = if (parsed.object.get("role")) |v| v.string else continue;
+        const role_str = if (parsed.value.object.get("role")) |v| v.string else continue;
         const role: types.Role = if (std.mem.eql(u8, role_str, "user")) .user else if (std.mem.eql(u8, role_str, "assistant")) .assistant else if (std.mem.eql(u8, role_str, "tool")) .tool else .system;
 
-        const content_val = if (parsed.object.get("content")) |v| if (v == .string) v.string else null else null;
-        const tc_id_val = if (parsed.object.get("tool_call_id")) |v| if (v == .string) v.string else null else null;
-        const reasoning_val = if (parsed.object.get("reasoning")) |v| if (v == .string) v.string else null else null;
-        const ts_val = if (parsed.object.get("timestamp")) |v| if (v == .integer) @as(i96, @intCast(v.integer)) else null else null;
-        const is_error_val = if (parsed.object.get("is_error")) |v| if (v == .bool) v.bool else null else null;
-        const tool_name_val = if (parsed.object.get("name")) |v| if (v == .string) v.string else null else null;
-        const duration_val = if (parsed.object.get("duration_ms")) |v| @as(u32, @intCast(@min(@max(v.integer, 0), std.math.maxInt(u32)))) else null;
+        const content_val = if (parsed.value.object.get("content")) |v| if (v == .string) v.string else null else null;
+        const tc_id_val = if (parsed.value.object.get("tool_call_id")) |v| if (v == .string) v.string else null else null;
+        const reasoning_val = if (parsed.value.object.get("reasoning")) |v| if (v == .string) v.string else null else null;
+        const ts_val = if (parsed.value.object.get("timestamp")) |v| if (v == .integer) @as(i96, @intCast(v.integer)) else null else null;
+        const is_error_val = if (parsed.value.object.get("is_error")) |v| if (v == .bool) v.bool else null else null;
+        const tool_name_val = if (parsed.value.object.get("name")) |v| if (v == .string) v.string else null else null;
+        const duration_val = if (parsed.value.object.get("duration_ms")) |v| @as(u32, @intCast(@min(@max(v.integer, 0), std.math.maxInt(u32)))) else null;
 
         var tool_calls: ?[]types.ToolCall = null;
-        if (parsed.object.get("tool_calls")) |tcs_val| {
+        if (parsed.value.object.get("tool_calls")) |tcs_val| {
             const tc_array = tcs_val.array;
             var list = std.array_list.Managed(types.ToolCall).init(allocator);
             for (tc_array.items) |tc_item| {
@@ -242,7 +244,7 @@ pub fn loadEntries(allocator: std.mem.Allocator, content: []const u8) !struct { 
         }
 
         var content_parts: ?[]types.ContentPart = null;
-        if (parsed.object.get("image_url")) |img_url_val| {
+        if (parsed.value.object.get("image_url")) |img_url_val| {
             if (img_url_val != .null) {
                 content_parts = try allocator.alloc(types.ContentPart, 1);
                 content_parts.?[0] = .{ .image_url = .{ .url = try allocator.dupe(u8, img_url_val.string) } };
@@ -272,6 +274,33 @@ pub fn loadEntries(allocator: std.mem.Allocator, content: []const u8) !struct { 
         } });
     }
 
-    if (header == null) return error.MissingSessionHeader;
+    if (header == null) {
+        for (entries.items) |e| {
+            if (e == .message) {
+                if (e.message.content) |p| {
+                    for (p) |part| {
+                        switch (part) {
+                            .text => |t| allocator.free(t),
+                            .tool_result => |tr| {
+                                if (tr.name) |n| allocator.free(n);
+                                allocator.free(tr.id);
+                                allocator.free(tr.content);
+                            },
+                            else => {},
+                        }
+                    }
+                    allocator.free(p);
+                }
+                if (e.message.tool_calls) |tcs| {
+                    for (tcs) |tc| { allocator.free(tc.id); allocator.free(tc.name); allocator.free(tc.arguments); }
+                    allocator.free(tcs);
+                }
+                if (e.message.tool_call_id) |id| allocator.free(id);
+                if (e.message.reasoning) |r| allocator.free(r);
+            }
+        }
+        entries.deinit();
+        return error.MissingSessionHeader;
+    }
     return .{ .header = header.?, .entries = entries };
 }

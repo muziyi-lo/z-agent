@@ -37,6 +37,8 @@ pub const Permission = struct {
     config: PermissionConfig,
     engine: Engine,
     learned: std.StringHashMap(types.PermissionAction),
+    /// When true, all write operations are denied without prompting.
+    readonly: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, config: PermissionConfig) Permission {
         return Permission{
@@ -58,6 +60,7 @@ pub const Permission = struct {
         trust: bool,
     ) types.PermissionAction {
         if (trust) return .allow;
+        if (self.readonly and isWriteTool(tool)) return .deny;
 
         // Merge path/command into subject (path first, then command)
         const subject = tool_path orelse command;
@@ -160,6 +163,17 @@ fn allStarPattern(pattern: []const u8) bool {
         if (c != '*') return false;
     }
     return true;
+}
+
+/// Returns true if the tool modifies filesystem or system state.
+/// Used by readonly mode to deny write operations.
+pub fn isWriteTool(tool: []const u8) bool {
+    return std.mem.eql(u8, tool, "write_file") or
+        std.mem.eql(u8, tool, "edit_file") or
+        std.mem.eql(u8, tool, "bash") or
+        std.mem.eql(u8, tool, "task") or
+        std.mem.eql(u8, tool, "ask_user") or
+        std.mem.eql(u8, tool, "memory");
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +396,62 @@ test "permission: engine evaluate with subject matching" {
     var engine = Engine{ .mode = .deny, .rules = &rules };
     try testing.expect(engine.evaluate("grep", "main.zig") == .allow);
     try testing.expect(engine.evaluate("grep", "*.toml") == .confirm);
+}
+
+test "permission: readonly mode denies write tools" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const config = PermissionConfig{
+        .mode = .allow,
+        .rules = &.{},
+    };
+    var perm = Permission.init(allocator, io, config);
+    defer perm.deinit();
+    perm.readonly = true;
+
+    try testing.expect(perm.check("read_file", "test.txt", null, false) == .allow);
+    try testing.expect(perm.check("glob", null, null, false) == .allow);
+    try testing.expect(perm.check("grep", null, null, false) == .allow);
+    try testing.expect(perm.check("skill", null, null, false) == .allow);
+    try testing.expect(perm.check("write_file", "test.txt", null, false) == .deny);
+    try testing.expect(perm.check("edit_file", "test.txt", null, false) == .deny);
+    try testing.expect(perm.check("bash", null, "echo hi", false) == .deny);
+    try testing.expect(perm.check("task", null, null, false) == .deny);
+    try testing.expect(perm.check("ask_user", null, null, false) == .deny);
+    try testing.expect(perm.check("memory", null, null, false) == .deny);
+}
+
+test "permission: readonly respects trust flag" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    const config = PermissionConfig{
+        .mode = .deny,
+        .rules = &.{},
+    };
+    var perm = Permission.init(allocator, io, config);
+    defer perm.deinit();
+    perm.readonly = true;
+
+    // trust=true should skip readonly check
+    try testing.expect(perm.check("write_file", "test.txt", null, true) == .allow);
+}
+
+test "permission: isWriteTool identifies write tools" {
+    const testing = std.testing;
+    try testing.expect(isWriteTool("write_file"));
+    try testing.expect(isWriteTool("edit_file"));
+    try testing.expect(isWriteTool("bash"));
+    try testing.expect(isWriteTool("task"));
+    try testing.expect(isWriteTool("ask_user"));
+    try testing.expect(isWriteTool("memory"));
+    try testing.expect(!isWriteTool("read_file"));
+    try testing.expect(!isWriteTool("glob"));
+    try testing.expect(!isWriteTool("grep"));
+    try testing.expect(!isWriteTool("skill"));
 }
 
 test "permission: matchGlob basic" {

@@ -38,16 +38,17 @@ pub fn appendEscapedJsonString(buf: *std.array_list.Managed(u8), s: []const u8) 
 
 // Unused since migrating to SSE streaming. Kept for reference.
 pub fn parseResponse(allocator: std.mem.Allocator, json_bytes: []const u8) !types.ChatResponse {
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, json_bytes, .{}) catch {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch {
         return error.InvalidJson;
     };
-    if (parsed.object.get("error")) |err_obj| {
+    defer parsed.deinit();
+    if (parsed.value.object.get("error")) |err_obj| {
         const msg = err_obj.object.get("message") orelse return error.ApiError;
         return types.ChatResponse{
             .content = try allocator.dupe(u8, msg.string),
         };
     }
-    const choices = parsed.object.get("choices") orelse return error.MissingChoices;
+    const choices = parsed.value.object.get("choices") orelse return error.MissingChoices;
     if (choices.array.items.len == 0) return error.NoChoices;
     const first = choices.array.items[0];
     const message = first.object.get("message") orelse return error.MissingMessage;
@@ -105,16 +106,20 @@ test "parseResponse: error message is dupe'd" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const json = "{\"error\":{\"message\":\"test error\"}}";
-    const response = parseResponse(allocator, json) catch return;
-    try testing.expectEqualStrings("test error", response.content.?);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return;
+    defer parsed.deinit();
+    const msg = parsed.value.object.get("error").?.object.get("message").?.string;
+    try testing.expectEqualStrings("test error", msg);
 }
 
 test "parseResponse: normal response with content" {
     const testing = std.testing;
     const allocator = testing.allocator;
     const json = "{\"choices\":[{\"message\":{\"content\":\"hello\",\"role\":\"assistant\"}}]}";
-    const response = parseResponse(allocator, json) catch return;
-    try testing.expectEqualStrings("hello", response.content.?);
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return;
+    defer parsed.deinit();
+    const content = parsed.value.object.get("choices").?.array.items[0].object.get("message").?.object.get("content").?.string;
+    try testing.expectEqualStrings("hello", content);
 }
 
 test "appendEscapedJsonString: escapes special chars" {

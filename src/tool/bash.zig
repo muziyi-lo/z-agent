@@ -196,8 +196,9 @@ fn getShellFlag(exe: []const u8) []const u8 {
 }
 
 fn parseJsonResult(allocator: std.mem.Allocator, json_str: []const u8) ?struct { exit_code: i32, stdout: []const u8, stderr: []const u8, truncated: bool } {
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, json_str, .{}) catch return null;
-    const obj = parsed.object;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch return null;
+    defer parsed.deinit();
+    const obj = parsed.value.object;
     const exit_code = if (obj.get("exit_code")) |v| @as(i32, @intCast(v.integer)) else -1;
     const stdout = if (obj.get("stdout")) |v| if (v == .string) v.string else "" else "";
     const stderr = if (obj.get("stderr")) |v| if (v == .string) v.string else "" else "";
@@ -227,14 +228,11 @@ test "bash: echo returns valid JSON with stdout" {
         return;
 
     const parsed = parseJsonResult(allocator, tr.output);
-    if (parsed == null)
-        return;
+    const p = parsed orelse return;
 
-    if (parsed) |p| {
-        try testing.expectEqual(@as(i32, 0), p.exit_code);
-        try testing.expect(std.mem.indexOf(u8, p.stdout, "hello") != null);
-        try testing.expect(!p.truncated);
-    }
+    try testing.expectEqual(@as(i32, 0), p.exit_code);
+    try testing.expect(std.mem.indexOf(u8, p.stdout, "hello") != null);
+    try testing.expect(!p.truncated);
 }
 
 test "bash: missing command returns error" {
@@ -357,10 +355,7 @@ test "bash: nonexistent command returns non-zero exit" {
         return;
 
     const parsed = parseJsonResult(allocator, tr.output);
-    if (parsed == null)
-        return;
+    const p = parsed orelse return;
 
-    if (parsed) |p| {
-        try testing.expect(p.exit_code != 0);
-    }
+    try testing.expect(p.exit_code != 0);
 }
