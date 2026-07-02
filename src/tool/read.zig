@@ -1,5 +1,6 @@
 const std = @import("std");
 const jh = @import("json.zig");
+const trunc = @import("truncate.zig");
 const root_dir = @import("root_dir.zig");
 const ToolResult = @import("registry.zig").ToolResult;
 
@@ -80,7 +81,7 @@ pub fn execute(allocator: std.mem.Allocator, io: std.Io, args: std.json.Value) T
             return ToolResult.fail(jsonErrorStr(allocator, "file is not valid UTF-8 at '{s}'", .{path.string}));
         }
 
-        const r = truncateBytes(raw, MAX_BYTES);
+        const r = trunc.truncateUtf8(raw, MAX_BYTES);
         const content = r.text;
         const truncated = r.truncated;
 
@@ -481,16 +482,6 @@ fn parseArg(comptime T: type, obj: std.json.ObjectMap, key: []const u8, default:
         if (v != .null and v.integer >= 0) return @as(T, @intCast(v.integer));
     }
     return default;
-}
-
-fn truncateBytes(data: []const u8, max: usize) struct { text: []const u8, truncated: bool } {
-    if (data.len <= max) return .{ .text = data, .truncated = false };
-    return .{ .text = data[0..max], .truncated = true };
-}
-
-fn truncateLinesSafe(allocator: std.mem.Allocator, data: []const u8, max: usize) ![]const u8 {
-    _ = allocator;
-    return data[0..@min(max, data.len)];
 }
 
 fn escapeJson(buf: *std.array_list.Managed(u8), s: []const u8) !void {

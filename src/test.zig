@@ -32,6 +32,8 @@ comptime {
     _ = @import("compact.zig");
     _ = @import("permission.zig");
     _ = @import("tool/memory.zig");
+    _ = @import("tool/memory/session.zig");
+    _ = @import("tool/memory/designer.zig");
     _ = @import("toml.zig");
     _ = @import("config.zig");
     _ = @import("picker.zig");

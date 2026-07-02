@@ -1,33 +1,26 @@
 # Changelog
 
-## [0.3.0] - 2026-07-01
-
-### Added
-- `src/picker.zig` — 交互式方向键选择器：↑↓ 导航、Enter 确认、Esc 取消、VT100 重绘（`src/picker.zig`）
-- `src/tool/edit.zig` — 模糊匹配 3 层（exact/line_trimmed/whitespace_normalized）、100KB 大小限制、原子写入（.tmp + rename）、renderResult diff 展示、MatchRange 结构体（`src/tool/edit.zig`）
-- `src/tool/write.zig` — 内容大小上限 MAX_WRITE=512KB、原子写入（.tmp + rename）、renderResult 彩色展示、content_preview 按 Unicode 码点截断（`src/tool/write.zig`）
-- `docs/design/edit-tool.md` — edit_file 设计文档（`src/tool/edit.zig`）
-- `docs/design/write-tool.md` — write_file 设计文档（`src/tool/write.zig`）
-- `projects/z-agent/AGENTS.md` — Build & test 区新增构建约定（优化选项注释、Binary freshness 规则）（`projects/z-agent/AGENTS.md`）
-
-### Changed
-- `src/agent.zig` — 权限确认 `[y/N]` 改为交互式 picker；`printToolCall` 新增 skill/ask_user 专用分支隐藏 JSON 源码；删除废弃 `readlineConfirm`（`src/agent.zig`）
-- `src/App.zig` — 模型切换确认 `[y/N]` 改为交互式 picker；删除废弃 `readlineConfirm`（`src/App.zig`）
-- `src/ansi.zig` — `init()` 增加输入句柄 `ENABLE_VIRTUAL_TERMINAL_INPUT` 支持方向键输入（`src/ansi.zig`）
-- `src/tool/bash.zig` — 解禁 `Remove-Item`，允许 AI 删除文件（`src/tool/bash.zig`）
-- `src/tool/skill.zig` — `renderResult` 仅显示技能名称，不再输出 SKILL.md 全文（`src/tool/skill.zig`）
-- `src/tool/write.zig` — 重构设计文档格式对齐 read/edit 标准（`src/tool/write.zig`、`docs/design/write-tool.md`）
-- `src/tool/read.zig` — 修复 `formatSize` 和 `generateNote` 测试双 free（var 复用 + multi-defer）（`src/tool/read.zig`）
-- `docs/` — 删除 10 个过期计划文档（`docs/*plan*`、`docs/development-plan.md`）
-
-### Tests
-- `src/picker.zig` — 新增 2 个测试：Key 枚举映射、空选项错误路径（`src/picker.zig`）
-- `src/tool/edit.zig` — 新增 13 个测试：模糊匹配 3 层路径、大小超限、原子写入、多候选报错（`src/tool/edit.zig`）
-- `src/tool/write.zig` — 新增 3 个测试：内容大小超限、码点预览、原子写入清理验证（`src/tool/write.zig`）
-
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-02
+
+### Added
+- `src/tool/memory/types.zig` — Entry 类型新增 scope/status/handled/recurrence-count/archived/related-files 字段（`src/tool/memory/types.zig`）
+- `src/tool/memory/parse.zig` — 记忆条目解析子模块，容错解析与缓存（`src/tool/memory/parse.zig`）
+- `src/tool/memory/crud.zig` — 记忆 CRUD 子模块：原子写入、缓存、条目管理（`src/tool/memory/crud.zig`）
+- `src/tool/memory/archive.zig` — 记忆归档/提升/统计子模块（`src/tool/memory/archive.zig`）
+- `src/tool/memory/session.zig` — SessionState 跟踪模块：HardCase/SkillMetric/OperationLogEntry 类型、load/save/addLogEntry/addHardCase、日志修剪、原子写入（`src/tool/memory/session.zig`）
+- `src/tool/memory/designer.zig` — Designer 流水线：9 子命令（collect/propose/list/review/approve/apply/rollback/verify/report）、6 通道置信度评分、CRC32 冲突检测（`src/tool/memory/designer.zig`）
+- `src/tool/memory/skill_bank.zig` — Skill-bank 追踪：list/update 子命令（`src/tool/memory/skill_bank.zig`）
+- `src/tool/memory/self_improve.zig` — ESC 中断 self-improve：checkInterrupt/recordBashFailure（`src/tool/memory/self_improve.zig`）
+- `src/tool/truncate.zig` — 新增 truncateUtf8/truncateCodepoints 函数，统一截断逻辑（`src/tool/truncate.zig`）
+
 ### Changed
+- `src/tool/memory.zig` — 记忆系统拆分为 8 子模块（types/parse/crud/archive/session/designer/skill_bank/self_improve），原 986 行转发层（`src/tool/memory.zig`）
+- `src/retrieval.zig` — BM25 检索替换 cmdRecall 手写评分，pattern-key exact match 短路返回 1.0，删除 cjkBigrams/isCJKStart ~95 行（`src/retrieval.zig`）
+- `src/tool/read.zig` — 适配 truncateUtf8，修复 formatSize/generateNote 双 free（`src/tool/read.zig`）
+- `src/tool/edit.zig` — 适配 truncateCodepoints，改进模糊匹配（`src/tool/edit.zig`）
+- `src/test.zig` — 新增 memory 子模块测试入口（`src/test.zig`）
 - `src/system.zig` — 移除 `Available tools` 段（工具描述由 API `tools` 参数唯一提供）；PowerShell 开销警告移入 `<env>` 块（`src/system.zig`）
 - `src/agent.zig` — 移除 `read_file` 用户显示硬编码分支（由 `read.zig` 的 `renderResult` 替代）（`src/agent.zig`）
 - `docs/design/agent-system.md` — 同步 system prompt 组装层数（移除了第 9 层工具列表）和一致性检查项（`docs/design/agent-system.md`）
@@ -82,6 +75,31 @@
 ### Tests
 - `src/tool/task.zig` — 新增 2 个测试：空 files 数组不崩溃、不存在文件路径优雅降级（`src/tool/task.zig`）
 - `src/permission.zig` — 新增 3 个测试：readonly 模式拒绝写操作、readonly 尊重 trust flag、isWriteTool 工具分类正确（`src/permission.zig`）
+
+## [0.3.0] - 2026-07-01
+
+### Added
+- `src/picker.zig` — 交互式方向键选择器：↑↓ 导航、Enter 确认、Esc 取消、VT100 重绘（`src/picker.zig`）
+- `src/tool/edit.zig` — 模糊匹配 3 层（exact/line_trimmed/whitespace_normalized）、100KB 大小限制、原子写入（.tmp + rename）、renderResult diff 展示、MatchRange 结构体（`src/tool/edit.zig`）
+- `src/tool/write.zig` — 内容大小上限 MAX_WRITE=512KB、原子写入（.tmp + rename）、renderResult 彩色展示、content_preview 按 Unicode 码点截断（`src/tool/write.zig`）
+- `docs/design/edit-tool.md` — edit_file 设计文档（`src/tool/edit.zig`）
+- `docs/design/write-tool.md` — write_file 设计文档（`src/tool/write.zig`）
+- `projects/z-agent/AGENTS.md` — Build & test 区新增构建约定（优化选项注释、Binary freshness 规则）（`projects/z-agent/AGENTS.md`）
+
+### Changed
+- `src/agent.zig` — 权限确认 `[y/N]` 改为交互式 picker；`printToolCall` 新增 skill/ask_user 专用分支隐藏 JSON 源码；删除废弃 `readlineConfirm`（`src/agent.zig`）
+- `src/App.zig` — 模型切换确认 `[y/N]` 改为交互式 picker；删除废弃 `readlineConfirm`（`src/App.zig`）
+- `src/ansi.zig` — `init()` 增加输入句柄 `ENABLE_VIRTUAL_TERMINAL_INPUT` 支持方向键输入（`src/ansi.zig`）
+- `src/tool/bash.zig` — 解禁 `Remove-Item`，允许 AI 删除文件（`src/tool/bash.zig`）
+- `src/tool/skill.zig` — `renderResult` 仅显示技能名称，不再输出 SKILL.md 全文（`src/tool/skill.zig`）
+- `src/tool/write.zig` — 重构设计文档格式对齐 read/edit 标准（`src/tool/write.zig`、`docs/design/write-tool.md`）
+- `src/tool/read.zig` — 修复 `formatSize` 和 `generateNote` 测试双 free（var 复用 + multi-defer）（`src/tool/read.zig`）
+- `docs/` — 删除 10 个过期计划文档（`docs/*plan*`、`docs/development-plan.md`）
+
+### Tests
+- `src/picker.zig` — 新增 2 个测试：Key 枚举映射、空选项错误路径（`src/picker.zig`）
+- `src/tool/edit.zig` — 新增 13 个测试：模糊匹配 3 层路径、大小超限、原子写入、多候选报错（`src/tool/edit.zig`）
+- `src/tool/write.zig` — 新增 3 个测试：内容大小超限、码点预览、原子写入清理验证（`src/tool/write.zig`）
 
 ## [0.2.0] - 2026-06-28
 

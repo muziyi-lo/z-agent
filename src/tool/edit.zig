@@ -1,5 +1,6 @@
 const std = @import("std");
 const jh = @import("json.zig");
+const trunc = @import("truncate.zig");
 const ansi = @import("../ansi.zig");
 const root_dir = @import("root_dir.zig");
 const ToolResult = @import("registry.zig").ToolResult;
@@ -246,19 +247,6 @@ fn findAllWhitespaceNormalized(text: []const u8, pattern: []const u8, allocator:
     return positions.toOwnedSlice();
 }
 
-/// Truncate string to at most max_codepoints Unicode codepoints.
-/// Source: edit.zig — context preview truncation
-fn truncateToCodepoints(s: []const u8, max_codepoints: usize) []const u8 {
-    var count: usize = 0;
-    var i: usize = 0;
-    while (i < s.len and count < max_codepoints) {
-        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch break;
-        i += len;
-        count += 1;
-    }
-    return s[0..i];
-}
-
 /// Extract context range (2 lines before, 2 lines after) around a match position.
 /// Source: edit.zig — context preview for old_preview/new_preview
 fn extractContextRange(text: []const u8, pos: usize, old_len: usize) struct { start: usize, end: usize } {
@@ -314,7 +302,7 @@ fn buildPreviews(
 ) !PreviewResult {
     const ctx = extractContextRange(text, pos, old_len);
     const old_raw = text[ctx.start..ctx.end];
-    const old_truncated = truncateToCodepoints(old_raw, 240);
+    const old_truncated = trunc.truncateCodepoints(old_raw, 240).text;
 
     const match_ctx_start = if (pos >= ctx.start) pos - ctx.start else 0;
     const match_ctx_end = if (pos + old_len <= ctx.end)
@@ -332,7 +320,7 @@ fn buildPreviews(
         try new_buf.appendSlice(old_raw[match_ctx_end..]);
     }
     const new_raw = try new_buf.toOwnedSlice();
-    const new_truncated = truncateToCodepoints(new_raw, 240);
+    const new_truncated = trunc.truncateCodepoints(new_raw, 240).text;
     allocator.free(new_raw);
 
     return .{

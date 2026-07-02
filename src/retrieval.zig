@@ -1,4 +1,5 @@
 const std = @import("std");
+const trunc = @import("tool/truncate.zig");
 
 pub const Document = struct {
     id: []const u8,
@@ -183,7 +184,7 @@ fn extractSnippet(allocator: std.mem.Allocator, content: []const u8, q_tokens: [
     if (q_tokens.len == 0) return content;
 
     var best_start: usize = 0;
-    var best_end: usize = @min(content.len, 200);
+    var best_end: usize = trunc.truncateUtf8(content, 200).text.len;
     var best_score: usize = 0;
 
     const window: usize = 200;
@@ -202,7 +203,7 @@ fn extractSnippet(allocator: std.mem.Allocator, content: []const u8, q_tokens: [
         }
     }
 
-    if (best_score == 0) return allocator.dupe(u8, content[0..@min(content.len, 200)]);
+    if (best_score == 0) return allocator.dupe(u8, content[0..trunc.truncateUtf8(content, 200).text.len]);
 
     const snippet = content[best_start..best_end];
     return allocator.dupe(u8, snippet);
