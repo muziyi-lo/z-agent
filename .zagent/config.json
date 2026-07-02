@@ -1,7 +1,0 @@
-{
-  "api": "deepseek",
-  "model": "deepseek-v4-flash",
-  "base_url": "https://api.deepseek.com",
-  "max_tokens": 4096,
-  "context_limit": 1048576
-}
